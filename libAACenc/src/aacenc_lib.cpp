@@ -2123,3 +2123,119 @@ bail:
     return err;
 }
 
+#define RB_STATE_PERSISTENCE_EXTENSION
+#ifdef RB_STATE_PERSISTENCE_EXTENSION
+
+#include <stdio.h>
+
+#if 0
+
+template <typename T>
+void writeStruct(const T* p, FILE *fp)
+{
+    size_t structSize = sizeof(T);
+    fwrite(&structSize, sizeof(size_t), 1, fp);
+    fwrite(p, structSize, 1, fp);
+}
+
+static void write_hAacEnc(const HANDLE_AAC_ENC hAacEnc, FILE *fp)
+{
+    writeStruct<struct AAC_ENC>( hAacEnc, fp );
+
+    /*
+    hAacEnc->config; // no pointers/subobjects
+
+
+    hAacEnc->qcKernel;
+      hAacEnc->qcKernel
+      hAacEnc->hBitCounter
+
+        hAacEnc->hBitCounter->bitLookUp
+        hAacEnc->hBitCounter->mergeGainLookUp
+
+      hAacEnc->hAdjThr
+        hAacEnc->hAdjThr->adjThrStateElem
+
+
+    hAacEnc->qcOut;
+      hAacEnc->qcOut->qcElement;
+        hAacEnc->qcOut->qcElement->extension[0]->pPayload
+        hAacEnc->qcOut->qcElement->qcOutChannel;
+
+
+
+
+    hAacEnc->psyOut;
+    hAacEnc->psyKernel;
+    hAacEnc->dynamic_RAM;
+    */
+}
+
+static void write_hEnvEnc(const HANDLE_SBR_ENCODER hEnvEnc, FILE *fp)
+{
+    writeStruct<struct SBR_ENCODER>( hEnvEnc, fp );
+}
+
+static void write_hMetadataEnc(const HANDLE_FDK_METADATA_ENCODER hMetadataEnc, FILE *fp)
+{
+    writeStruct<struct FDK_METADATA_ENCODER>( hMetadataEnc, fp );
+}
+
+static void write_hTpEnc(const HANDLE_TRANSPORTENC hTpEnc, FILE *fp)
+{
+    writeStruct<struct TRANSPORTENC>( hTpEnc, fp );
+}
+
+static void write_outBuffer(const UCHAR *outBuffer, FILE *fp)
+{
+    // TODO
+}
+
+static void write_inputBuffer(const INT_PCM *inputBuffer, FILE *fp)
+{
+    // TODO
+}
+
+static void write_hAacEncoder(const HANDLE_AACENCODER hAacEncoder, FILE *fp)
+{
+
+    writeStruct<struct AACENCODER>( hAacEncoder, fp );
+
+    write_hAacEnc( hAacEncoder->hAacEnc, fp );
+    write_hEnvEnc( hAacEncoder->hEnvEnc, fp );
+    write_hMetadataEnc( hAacEncoder->hMetadataEnc, fp );
+    write_hTpEnc( hAacEncoder->hTpEnc, fp );
+    write_outBuffer( hAacEncoder->outBuffer, fp );
+    write_inputBuffer( hAacEncoder->inputBuffer, fp );
+
+    // TODO write_extPayload( hAacEncoder->hAacEnc, fp );
+
+    /*
+    HANDLE_AAC_ENC           hAacEnc;
+    HANDLE_SBR_ENCODER       hEnvEnc;
+    HANDLE_FDK_METADATA_ENCODER  hMetadataEnc;
+    HANDLE_TRANSPORTENC      hTpEnc;
+    UCHAR                   *outBuffer;
+    INT_PCM                 *inputBuffer;
+    AACENC_EXT_PAYLOAD       extPayload [MAX_TOTAL_EXT_PAYLOADS];
+    */
+}
+
+#endif
+
+void aacEncoder_ExtSaveState(const HANDLE_AACENCODER hAacEncoder, void *fp_)
+{
+    FILE *fp = (FILE*)fp_;
+
+#if 0
+    write_hAacEncoder( hAacEncoder, fp );
+#endif
+}
+
+void aacEncoder_ExtLoadState(HANDLE_AACENCODER hAacEncoder, void *fp_)
+{
+    FILE *fp = (FILE*)fp_;
+
+}
+
+#endif /* RB_STATE_PERSISTENCE_EXTENSION */

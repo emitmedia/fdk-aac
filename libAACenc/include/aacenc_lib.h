@@ -1221,6 +1221,14 @@ AACENC_ERROR aacEncGetLibInfo(
         );
 
 
+#define RB_STATE_PERSISTENCE_EXTENSION
+#ifdef RB_STATE_PERSISTENCE_EXTENSION
+
+void aacEncoder_ExtSaveState( const HANDLE_AACENCODER hAacEncoder, void *fp );
+void aacEncoder_ExtLoadState( HANDLE_AACENCODER hAacEncoder, void *fp );
+
+#endif /* RB_STATE_PERSISTENCE_EXTENSION */
+
 #ifdef __cplusplus
 }
 #endif
