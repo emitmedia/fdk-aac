@@ -2126,116 +2126,409 @@ bail:
 #define RB_STATE_PERSISTENCE_EXTENSION
 #ifdef RB_STATE_PERSISTENCE_EXTENSION
 
-#include <stdio.h>
+#include <cassert>
+#include <cstdio>
+#include <cstdint>
+#include <vector>
 
-#if 0
+
+// FIXME: anonymous namespace?
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+struct PersistenceTraversalData {
+    enum TraversalType { READ, WRITE };
+
+    TraversalType type;
+    FILE *fp;
+
+    PersistenceTraversalData(TraversalType t, FILE *f)
+        : type(t)
+        , fp(f) {}
+};
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+void writeStruct(const void* p, size_t size, FILE *fp)
+{
+    std::fwrite(&size, sizeof(size_t), 1, fp);
+    std::fwrite(p, size, 1, fp);
+}
+
+void readStruct(void* p, size_t size, FILE *fp)
+{
+    size_t persistedStorageSize = 0;
+    std::fread(&persistedStorageSize, sizeof(size_t), 1, fp);
+    if (persistedStorageSize != size)
+        throw "ERROR: file storage layout does not match memory format";
+    std::fread(p, size, 1, fp);
+}
+
+void readOrWriteStruct(void *ptr, size_t size, PersistenceTraversalData& td)
+{
+    switch (td.type) {
+    case PersistenceTraversalData::READ:
+        readStruct(ptr, size, td.fp);
+        break;
+    case PersistenceTraversalData::WRITE:
+        writeStruct(ptr, size, td.fp);
+        break;
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+class SparseStructPersistInfo {
+    struct Range { // half open range [begin, end)
+        Range(size_t b, size_t e)
+            : begin(b)
+            , end(e) {}
+
+        size_t begin;
+        size_t end;    
+    };
+
+    size_t storageSize_;
+    std::vector<Range> ranges_; // sparse list of byte ranges to persist
+
+    void write_(const void *ptr, FILE *fp)
+    {
+        const uint8_t *p = (const uint8_t*)ptr;
+        std::fwrite(&storageSize_, sizeof(size_t), 1, fp);
+        for (std::vector<Range>::iterator i = ranges_.begin(); i != ranges_.end(); ++i) {
+            std::fwrite(&p[i->begin], (i->end - i->begin), 1, fp);
+        }
+    }
+
+    void read_(void *ptr, FILE *fp)
+    {
+        uint8_t *p = (uint8_t*)ptr;
+
+        size_t persistedStorageSize;
+        std::fread(&persistedStorageSize, sizeof(size_t), 1, fp);
+        if (persistedStorageSize != storageSize_)
+            throw "ERROR: file storage layout does not match memory format";
+
+        for (std::vector<Range>::iterator i = ranges_.begin(); i != ranges_.end(); ++i) {
+            std::fread(&p[i->begin], (i->end - i->begin), 1, fp);
+        }
+    }
+
+public:
+    SparseStructPersistInfo(size_t structSize)
+        : storageSize_( structSize )
+    {
+        ranges_.push_back(Range(0, structSize));
+    }
+
+    void skipField(size_t fieldOffset, size_t fieldSize)
+    {
+        // require that splits are ordered
+        // split final segment at fieldOffset...
+        // keep track of storage size
+
+        assert( storageSize_ > fieldSize ); // > not >= because we assume that we will always write some data
+        assert( fieldOffset >= ranges_.back().begin ); // fields must be skipped in order. therefore always fall in the trailing segment
+        assert(fieldOffset + fieldSize <= ranges_.back().end); // field-skip overruns end of struct. impossible. 
+
+        if (fieldOffset == ranges_.back().begin) { // skipping field at the start of final segment
+        
+            ranges_.back().begin += fieldSize;
+            assert( ranges_.back().begin <= ranges_.back().end ); 
+        
+            if (ranges_.back().begin == ranges_.back().end) // skipped final and only field
+                ranges_.pop_back();
+        
+        } else if (fieldOffset + fieldSize == ranges_.back().end) { // skipping field at end of final segment
+
+            ranges_.back().end = fieldOffset;
+
+            assert( ranges_.back().begin != ranges_.back().end ); // we shouldn't be in this if branch if fieldOffset==begin
+        
+        } else { // split final segment 
+            size_t end = ranges_.back().end;
+            ranges_.back().end = fieldOffset;
+            ranges_.push_back(Range(fieldOffset+fieldSize, end));
+        }
+        
+        storageSize_ -= fieldSize;
+    }
+
+protected:
+    void readOrWrite_( void *ptr, PersistenceTraversalData& td )
+    {
+        switch (td.type) {
+        case PersistenceTraversalData::READ:
+            read_(ptr, td.fp);
+            break;
+        case PersistenceTraversalData::WRITE:
+            write_(ptr, td.fp);
+            break;
+        }
+    }
+};
+
+#define SKIP_FIELD( s, t, m ) skipField( offsetof(s,m), sizeof(t) ) // struct, memberType, member
+
+//////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
-void writeStruct(const T* p, FILE *fp)
+struct ContiguousStructPersistInfo_T {
+    // leafs only read or write. never traverse
+    void readOrWrite(T *ptr, PersistenceTraversalData& td)
+    {
+        readOrWriteStruct(ptr, sizeof(T), td);
+    }
+};
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+template <typename T>
+struct FIXME_TODO_StructPersistInfo_T { // placeholder for structs that haven't been handled yet
+    // leafs only read or write. never traverse
+    void readOrWrite(T *ptr, PersistenceTraversalData& td)
+    {
+        assert(false);
+    }
+
+    void traverse(T *ptr, PersistenceTraversalData& td)
+    {
+        assert(false);
+    }
+};
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<QC_STATE> persist_QC_STATE;
+
+// QC_STATE:
+                // QC_STATE::ELEMENT_BITS ptr ->
+                    // ELEMENT_BITS [no handles]
+
+                // QC_STATE::BITCNTR_STATE ptr ->
+                    // BITCNTR_STATE:                
+                    // INT *bitLookUp ?  pointer into some other existing thing?
+                    // INT *mergeGainLookUp ?
+    
+                // QC_STATE::ADJ_THR_STATE ptr ->
+                    // ADJ_THR_STATE
+                    // ADJ_THR_STATE::BRES_PARAM [no handles]
+                    // ADJ_THR_STATE::ATS_ELEMENT ptr ->
+                        // ATS_ELEMENT [no handles]
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<QC_OUT> persist_QC_OUT;
+
+// QC_OUT:
+                // QC_OUT::QC_OUT_ELEMENT ptrs ->
+                    // QC_OUT_ELEMENT:
+                        // QC_OUT_ELEMENT::QC_OUT_EXTENSION
+                            // QC_OUT_EXTENSION::UCHAR *pPayload ? "ptr to payload" ??
+
+                        // QC_OUT_ELEMENT::QC_OUT_CHANNEL ptr[2] -> ptr to channels in QC_OUT ??
+
+                // QC_OUT::QC_OUT_CHANNEL ptrs[8] ->
+                    // QC_OUT_CHANNEL [contiguous storage with nested arrays, no ptrs]
+
+                // QC_OUT::QC_OUT_EXTENSION ptrs ->
+                    // QC_OUT_EXTENSION ?
+                    // QC_OUT_ELEMENT::QC_OUT_EXTENSION ?? "global extension payload"
+                        // QC_OUT_EXTENSION::UCHAR *pPayload ? "ptr to payload" ??
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<PSY_OUT> persist_PSY_OUT;
+
+// PSY_OUT:
+                // PSY_OUT::PSY_OUT_ELEMENT ptr[8] ->
+                    // PSY_OUT_ELEMENT:
+                        // PSY_OUT_ELEMENT::PSY_OUT_CHANNEL ptr[2] ... presumably pointers to the channels in PSY_OUT
+                        // PSY_OUT_ELEMENT::TOOLSINFO [flat struct]
+
+                // PSY_OUT::PSY_OUT_CHANNEL ptr[8] 
+                    // PSY_OUT_CHANNEL:
+                    // PSY_OUT_CHANNEL::TNS_INFO [flat struct of arrays of ints]
+
+                    // PSY_OUT_CHANNEL::FIXP_DBL ptrs "memory located in QC_OUT_CHANNEL"
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<PSY_INTERNAL> persist_PSY_INTERNAL;
+
+// PSY_INTERNAL:
+                // PSY_INTERNAL::PSY_CONFIGURATION [flat nested structs no pointers]
+                // PSY_INTERNAL::PSY_ELEMENT ptr ->
+                    // PSY_ELEMENT:
+                    // PSY_ELEMENT::PSY_STATIC ptr[2] -> presumably points to PSY_STATICS?
+
+                // PSY_INTERNAL::PSY_STATIC ptr[8] -> 
+                    // PSY_STATIC:
+                    // PSY_STATIC::INT_PCM ptr-> ?? input buffer ?? does this change?
+                    // PSY_STATIC::BLOCK_SWITCHING_CONTROL [flat struct]
+
+                // PSY_INTERNAL::PSY_DYNAMIC ptr ->
+                    // PSY_DYNAMIC:
+                    // PSY_DYNAMIC::PSY_DATA [flat data]
+                    // PSY_DYNAMIC::TNS_DATA [flat data]
+                    // PSY_DYNAMIC::PNS_DATA [flat data]
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<AAC_ENC> persist_AAC_ENC;
+
+// AAC_ENC:
+            // AAC_ENC::AACENC_CONFIG ptr ->
+                // AACENC_CONFIG [no handles]
+
+            // AAC_ENC::CHANNEL_MAPPING [contiguous storage with nested arrays, no ptrs]
+            // AAC_ENC::QC_STATE ptr ->
+                // QC_STATE:
+       
+            // AAC_ENC::QC_OUT ptr ->
+                // QC_OUT:
+
+            // AAC_ENC::PSY_OUT ptr ->
+                // PSY_OUT:
+
+            // AAC_ENC::PSY_INTERNAL ptr ?
+
+                // PSY_INTERNAL:
+
+            // AAC_ENC::dynamic_RAM ptr ????????????????
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<SBR_ENCODER> persist_SBR_ENCODER;
+
+// SBR_ENCODER:
+// SBR_ENCODER::HANDLE_SBR_ELEMENT
+                // SBR_ELEMENT ???
+
+            // SBR_ENCODER::HANDLE_SBR_CHANNEL
+         //   ?
+            // SBR_ENCODER::QMF_FILTER_BANK
+         //   ?
+            // SBR_ENCODER::DOWNSAMPLER
+         //   ?
+            // SBR_ENCODER::UCHAR* dynamicRam;
+         //   ?
+            // SBR_ENCODER::UCHAR* pSBRdynamic_RAM;
+         //   ?
+            // SBR_ENCODER::HANDLE_PARAMETRIC_STEREO
+         //   ?
+            // SBR_ENCODER::QMF_FILTER_BANK
+         //   ?
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<FDK_METADATA_ENCODER> persist_FDK_METADATA_ENCODER;
+
+// FDK_METADATA_ENCODER:
+                // FDK_METADATA_ENCODER::HDRC_COMP [flat structs]
+                // FDK_METADATA_ENCODER::AACENC_MetaData [flat struct]
+                // FDK_METADATA_ENCODER::AAC_METADATA [flat struct]
+                // FDK_METADATA_ENCODER::AACENC_EXT_PAYLOAD ->
+                    // AACENC_EXT_PAYLOAD:: ptr to data ??????????????????
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static FIXME_TODO_StructPersistInfo_T<TRANSPORTENC> persist_TRANSPORTENC;
+
+// TRANSPORTENC ?
+            // ::CODER_CONFIG [flat struct]
+
+            // ::FDK_BITSTREAM::FDK_BITBUF
+            // UCHAR *Buffer;
+            // ::UCHAR *bsBuffer
+
+            // ::writer [union of flat structs]
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+struct AACENC_EXT_PAYLOAD_PersistInfo : SparseStructPersistInfo {
+    AACENC_EXT_PAYLOAD_PersistInfo()
+        : SparseStructPersistInfo(sizeof(AACENC_EXT_PAYLOAD))
+    {
+        SKIP_FIELD(AACENC_EXT_PAYLOAD, UCHAR*, pData);
+    }
+
+    void traverse(AACENC_EXT_PAYLOAD *ptr, PersistenceTraversalData& td)
+    {
+        readOrWrite_(ptr, td);
+
+        // REVIEW: AACENC_EXT_PAYLOAD::pData ptr. points where?
+        // assume that it points into extPayloadData
+    }
+};
+
+static AACENC_EXT_PAYLOAD_PersistInfo persist_AACENC_EXT_PAYLOAD;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+struct AACENCODER_PersistInfo : SparseStructPersistInfo {
+    AACENCODER_PersistInfo()
+        : SparseStructPersistInfo(sizeof(AACENCODER))
+    {        
+        SKIP_FIELD(AACENCODER, HANDLE_AAC_ENC, hAacEnc);
+        SKIP_FIELD(AACENCODER, HANDLE_SBR_ENCODER, hEnvEnc);
+        SKIP_FIELD(AACENCODER, HANDLE_FDK_METADATA_ENCODER, hMetadataEnc);
+        SKIP_FIELD(AACENCODER, HANDLE_TRANSPORTENC, hTpEnc);
+        SKIP_FIELD(AACENCODER, UCHAR*, outBuffer);
+        SKIP_FIELD(AACENCODER, UCHAR*, inputBuffer);
+
+        skipField(offsetof(AACENCODER,extPayload), sizeof(AACENC_EXT_PAYLOAD)*MAX_TOTAL_EXT_PAYLOADS);
+    }
+
+    void traverse(AACENCODER *ptr, PersistenceTraversalData& td)
+    {
+        readOrWrite_(ptr, td);
+
+        // AACENCODER:
+        // AACENCODER::USER_PARAM [no handles]
+        // AACENCODER::CODER_CONFIG [no handles]
+        // AACENCODER::AACENC_CONFIG [no handles]
+
+        // AACENCODER::HANDLE_AAC_ENC [pointer to AAC_ENC struct]
+        persist_AAC_ENC.traverse(ptr->hAacEnc, td);
+
+        // AACENCODER::HANDLE_SBR_ENCODER [ pointer to SBR_ENCODER struct]
+        persist_SBR_ENCODER.traverse(ptr->hEnvEnc, td);
+        
+        // AACENCODER::HANDLE_FDK_METADATA_ENCODER [ pointer to FDK_METADATA_ENCODER struct ]
+        persist_FDK_METADATA_ENCODER.traverse(ptr->hMetadataEnc, td);
+        
+        // AACENCODER::HANDLE_TRANSPORTENC [ pointer to TRANSPORTENC struct ]
+        persist_TRANSPORTENC.traverse(ptr->hTpEnc, td);
+        
+        assert(false);
+ // FIXME TODO:
+        // AACENCODER:: UCHAR *outBuffer
+        // AACENCODER:: UCHAR *inputBuffer
+
+        // AACENCODER::AACENC_EXT_PAYLOAD [ extPayload is an array of AACENC_EXT_PAYLOAD, each pointing to data ]
+        for (int i=0; i < MAX_TOTAL_EXT_PAYLOADS; ++i) {
+            persist_AACENC_EXT_PAYLOAD.traverse(&ptr->extPayload[i], td);
+        }
+    }
+};
+static AACENCODER_PersistInfo persist_AACENCODER;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+void aacEncoder_ExtSaveState(const HANDLE_AACENCODER hAacEncoder, void *fp)
 {
-    size_t structSize = sizeof(T);
-    fwrite(&structSize, sizeof(size_t), 1, fp);
-    fwrite(p, structSize, 1, fp);
+    PersistenceTraversalData td( PersistenceTraversalData::WRITE, (std::FILE*)fp );
+    persist_AACENCODER.traverse(const_cast<HANDLE_AACENCODER>(hAacEncoder), td);
 }
 
-static void write_hAacEnc(const HANDLE_AAC_ENC hAacEnc, FILE *fp)
+void aacEncoder_ExtLoadState(HANDLE_AACENCODER hAacEncoder, void *fp)
 {
-    writeStruct<struct AAC_ENC>( hAacEnc, fp );
-
-    /*
-    hAacEnc->config; // no pointers/subobjects
-
-
-    hAacEnc->qcKernel;
-      hAacEnc->qcKernel
-      hAacEnc->hBitCounter
-
-        hAacEnc->hBitCounter->bitLookUp
-        hAacEnc->hBitCounter->mergeGainLookUp
-
-      hAacEnc->hAdjThr
-        hAacEnc->hAdjThr->adjThrStateElem
-
-
-    hAacEnc->qcOut;
-      hAacEnc->qcOut->qcElement;
-        hAacEnc->qcOut->qcElement->extension[0]->pPayload
-        hAacEnc->qcOut->qcElement->qcOutChannel;
-
-
-
-
-    hAacEnc->psyOut;
-    hAacEnc->psyKernel;
-    hAacEnc->dynamic_RAM;
-    */
-}
-
-static void write_hEnvEnc(const HANDLE_SBR_ENCODER hEnvEnc, FILE *fp)
-{
-    writeStruct<struct SBR_ENCODER>( hEnvEnc, fp );
-}
-
-static void write_hMetadataEnc(const HANDLE_FDK_METADATA_ENCODER hMetadataEnc, FILE *fp)
-{
-    writeStruct<struct FDK_METADATA_ENCODER>( hMetadataEnc, fp );
-}
-
-static void write_hTpEnc(const HANDLE_TRANSPORTENC hTpEnc, FILE *fp)
-{
-    writeStruct<struct TRANSPORTENC>( hTpEnc, fp );
-}
-
-static void write_outBuffer(const UCHAR *outBuffer, FILE *fp)
-{
-    // TODO
-}
-
-static void write_inputBuffer(const INT_PCM *inputBuffer, FILE *fp)
-{
-    // TODO
-}
-
-static void write_hAacEncoder(const HANDLE_AACENCODER hAacEncoder, FILE *fp)
-{
-
-    writeStruct<struct AACENCODER>( hAacEncoder, fp );
-
-    write_hAacEnc( hAacEncoder->hAacEnc, fp );
-    write_hEnvEnc( hAacEncoder->hEnvEnc, fp );
-    write_hMetadataEnc( hAacEncoder->hMetadataEnc, fp );
-    write_hTpEnc( hAacEncoder->hTpEnc, fp );
-    write_outBuffer( hAacEncoder->outBuffer, fp );
-    write_inputBuffer( hAacEncoder->inputBuffer, fp );
-
-    // TODO write_extPayload( hAacEncoder->hAacEnc, fp );
-
-    /*
-    HANDLE_AAC_ENC           hAacEnc;
-    HANDLE_SBR_ENCODER       hEnvEnc;
-    HANDLE_FDK_METADATA_ENCODER  hMetadataEnc;
-    HANDLE_TRANSPORTENC      hTpEnc;
-    UCHAR                   *outBuffer;
-    INT_PCM                 *inputBuffer;
-    AACENC_EXT_PAYLOAD       extPayload [MAX_TOTAL_EXT_PAYLOADS];
-    */
-}
-
-#endif
-
-void aacEncoder_ExtSaveState(const HANDLE_AACENCODER hAacEncoder, void *fp_)
-{
-    FILE *fp = (FILE*)fp_;
-
-#if 0
-    write_hAacEncoder( hAacEncoder, fp );
-#endif
-}
-
-void aacEncoder_ExtLoadState(HANDLE_AACENCODER hAacEncoder, void *fp_)
-{
-    FILE *fp = (FILE*)fp_;
-
+    PersistenceTraversalData td( PersistenceTraversalData::READ, (std::FILE*)fp );
+    persist_AACENCODER.traverse(hAacEncoder, td);
 }
 
 #endif /* RB_STATE_PERSISTENCE_EXTENSION */
