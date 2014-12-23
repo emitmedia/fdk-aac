@@ -2129,6 +2129,7 @@ bail:
 #include <cassert>
 #include <cstdio>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 
@@ -2138,14 +2139,52 @@ bail:
 
 struct PersistenceTraversalData {
     enum TraversalType { READ, WRITE };
-
+        
     TraversalType type;
     FILE *fp;
 
     PersistenceTraversalData(TraversalType t, FILE *f)
         : type(t)
         , fp(f) {}
+
+    std::map<intptr_t, size_t> traversedRanges_; 
+
+    bool enterTraversal( void *ptr, size_t size )
+    {
+        if (!ptr)
+            return false;
+
+        // prevent the same item from being persisted more than once:
+
+        intptr_t iptr = (intptr_t)ptr;
+
+        if (traversedRanges_.empty()) {    
+            //fprintf(stderr, "%p %d\n", (void*)ptr, size);
+            return true;
+        } else {
+            std::map<intptr_t, size_t>::iterator i = traversedRanges_.upper_bound(iptr); // returns next key strictly after iptr
+            if (i != traversedRanges_.begin())
+                --i; // should give key at or before iptr
+
+            if ((iptr >= i->first) && (iptr < (i->first + (intptr_t)i->second))) {
+                // range has already been persisted
+                return false;
+            } else {
+                //fprintf(stderr, "%p %d\n", (void*)ptr, size);
+                return true;
+            }
+        }
+    }
+
+    void leaveTraversal(void *ptr, size_t size)
+    {
+        intptr_t iptr = (intptr_t)ptr;
+        traversedRanges_.insert(std::make_pair(iptr, size));
+    }
 };
+
+#define ENTER_TRAVERSAL { if (!td.enterTraversal(ptr, sizeof(*ptr))) return; }
+#define LEAVE_TRAVERSAL { td.leaveTraversal(ptr, sizeof(*ptr)); }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -2227,8 +2266,12 @@ public:
         // split final segment at fieldOffset...
         // keep track of storage size
 
+        if (storageSize_ <= fieldSize)
         assert( storageSize_ > fieldSize ); // > not >= because we assume that we will always write some data
+        
+        if (fieldOffset < ranges_.back().begin)
         assert( fieldOffset >= ranges_.back().begin ); // fields must be skipped in order. therefore always fall in the trailing segment
+        
         assert(fieldOffset + fieldSize <= ranges_.back().end); // field-skip overruns end of struct. impossible. 
 
         if (fieldOffset == ranges_.back().begin) { // skipping field at the start of final segment
@@ -2270,14 +2313,20 @@ protected:
 
 #define SKIP_FIELD( s, t, m ) skipField( offsetof(s,m), sizeof(t) ) // struct, memberType, member
 
+#define SKIP_ARRAY_FIELD( s, t, m, n ) skipField( offsetof(s,m), sizeof(t)*(n) ) // struct, memberType, member, array elem count
+
 //////////////////////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
-struct ContiguousStructPersistInfo_T {
+struct ContiguousStructPersistInfo_T { // used for structs with no ptrs, where all data should be persisted
     // leafs only read or write. never traverse
     void readOrWrite(T *ptr, PersistenceTraversalData& td)
     {
+        ENTER_TRAVERSAL
+
         readOrWriteStruct(ptr, sizeof(T), td);
+
+        LEAVE_TRAVERSAL
     }
 };
 
@@ -2285,7 +2334,6 @@ struct ContiguousStructPersistInfo_T {
 
 template <typename T>
 struct FIXME_TODO_StructPersistInfo_T { // placeholder for structs that haven't been handled yet
-    // leafs only read or write. never traverse
     void readOrWrite(T *ptr, PersistenceTraversalData& td)
     {
         assert(false);
@@ -2298,154 +2346,1018 @@ struct FIXME_TODO_StructPersistInfo_T { // placeholder for structs that haven't 
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////
+// QC_STATE
 
-static FIXME_TODO_StructPersistInfo_T<QC_STATE> persist_QC_STATE;
-
-// QC_STATE:
-                // QC_STATE::ELEMENT_BITS ptr ->
-                    // ELEMENT_BITS [no handles]
-
-                // QC_STATE::BITCNTR_STATE ptr ->
-                    // BITCNTR_STATE:                
-                    // INT *bitLookUp ?  pointer into some other existing thing?
-                    // INT *mergeGainLookUp ?
-    
-                // QC_STATE::ADJ_THR_STATE ptr ->
-                    // ADJ_THR_STATE
-                    // ADJ_THR_STATE::BRES_PARAM [no handles]
-                    // ADJ_THR_STATE::ATS_ELEMENT ptr ->
-                        // ATS_ELEMENT [no handles]
-//////////////////////////////////////////////////////////////////////////////////////////////
-
-static FIXME_TODO_StructPersistInfo_T<QC_OUT> persist_QC_OUT;
-
-// QC_OUT:
-                // QC_OUT::QC_OUT_ELEMENT ptrs ->
-                    // QC_OUT_ELEMENT:
-                        // QC_OUT_ELEMENT::QC_OUT_EXTENSION
-                            // QC_OUT_EXTENSION::UCHAR *pPayload ? "ptr to payload" ??
-
-                        // QC_OUT_ELEMENT::QC_OUT_CHANNEL ptr[2] -> ptr to channels in QC_OUT ??
-
-                // QC_OUT::QC_OUT_CHANNEL ptrs[8] ->
-                    // QC_OUT_CHANNEL [contiguous storage with nested arrays, no ptrs]
-
-                // QC_OUT::QC_OUT_EXTENSION ptrs ->
-                    // QC_OUT_EXTENSION ?
-                    // QC_OUT_ELEMENT::QC_OUT_EXTENSION ?? "global extension payload"
-                        // QC_OUT_EXTENSION::UCHAR *pPayload ? "ptr to payload" ??
-
-//////////////////////////////////////////////////////////////////////////////////////////////
-
-static FIXME_TODO_StructPersistInfo_T<PSY_OUT> persist_PSY_OUT;
-
-// PSY_OUT:
-                // PSY_OUT::PSY_OUT_ELEMENT ptr[8] ->
-                    // PSY_OUT_ELEMENT:
-                        // PSY_OUT_ELEMENT::PSY_OUT_CHANNEL ptr[2] ... presumably pointers to the channels in PSY_OUT
-                        // PSY_OUT_ELEMENT::TOOLSINFO [flat struct]
-
-                // PSY_OUT::PSY_OUT_CHANNEL ptr[8] 
-                    // PSY_OUT_CHANNEL:
-                    // PSY_OUT_CHANNEL::TNS_INFO [flat struct of arrays of ints]
-
-                    // PSY_OUT_CHANNEL::FIXP_DBL ptrs "memory located in QC_OUT_CHANNEL"
-
-//////////////////////////////////////////////////////////////////////////////////////////////
-
-static FIXME_TODO_StructPersistInfo_T<PSY_INTERNAL> persist_PSY_INTERNAL;
-
-// PSY_INTERNAL:
-                // PSY_INTERNAL::PSY_CONFIGURATION [flat nested structs no pointers]
-                // PSY_INTERNAL::PSY_ELEMENT ptr ->
-                    // PSY_ELEMENT:
-                    // PSY_ELEMENT::PSY_STATIC ptr[2] -> presumably points to PSY_STATICS?
-
-                // PSY_INTERNAL::PSY_STATIC ptr[8] -> 
-                    // PSY_STATIC:
-                    // PSY_STATIC::INT_PCM ptr-> ?? input buffer ?? does this change?
-                    // PSY_STATIC::BLOCK_SWITCHING_CONTROL [flat struct]
-
-                // PSY_INTERNAL::PSY_DYNAMIC ptr ->
-                    // PSY_DYNAMIC:
-                    // PSY_DYNAMIC::PSY_DATA [flat data]
-                    // PSY_DYNAMIC::TNS_DATA [flat data]
-                    // PSY_DYNAMIC::PNS_DATA [flat data]
-
-//////////////////////////////////////////////////////////////////////////////////////////////
+static ContiguousStructPersistInfo_T<ELEMENT_BITS> persist_ELEMENT_BITS;
 
 
+struct BITCNTR_STATE_PersistInfo {
+    void readOrWrite(BITCNTR_STATE *ptr, PersistenceTraversalData& td)
+    {
+        // REVIEW: comment for GetRam_aacEnc_BitLookUp and GetRam_aacEnc_MergeGainLookUp says "values are temporary so dynamic RAM can be used"
+        // therefore we assume that we don't need to persist this data.
 
-//////////////////////////////////////////////////////////////////////////////////////////////
+        // BITCNTR_STATE:     
+        // INT *bitLookUp ?  pointer into some other existing thing?
+        // INT *mergeGainLookUp ?
+    }
+};
 
-static FIXME_TODO_StructPersistInfo_T<AAC_ENC> persist_AAC_ENC;
+static BITCNTR_STATE_PersistInfo persist_BITCNTR_STATE;
 
-// AAC_ENC:
-            // AAC_ENC::AACENC_CONFIG ptr ->
-                // AACENC_CONFIG [no handles]
 
-            // AAC_ENC::CHANNEL_MAPPING [contiguous storage with nested arrays, no ptrs]
-            // AAC_ENC::QC_STATE ptr ->
-                // QC_STATE:
-       
-            // AAC_ENC::QC_OUT ptr ->
-                // QC_OUT:
+static ContiguousStructPersistInfo_T<ATS_ELEMENT> persist_ATS_ELEMENT;
 
-            // AAC_ENC::PSY_OUT ptr ->
-                // PSY_OUT:
+struct ADJ_THR_STATE_PersistInfo : SparseStructPersistInfo {
+    ADJ_THR_STATE_PersistInfo()
+        : SparseStructPersistInfo(sizeof(ADJ_THR_STATE))
+    {
+        SKIP_ARRAY_FIELD(ADJ_THR_STATE, ATS_ELEMENT*, adjThrStateElem, 8);
+    }
 
-            // AAC_ENC::PSY_INTERNAL ptr ?
+    void traverse(ADJ_THR_STATE *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
 
-                // PSY_INTERNAL:
+        readOrWrite_(ptr, td);
 
-            // AAC_ENC::dynamic_RAM ptr ????????????????
+        // ADJ_THR_STATE:
+        // ADJ_THR_STATE::BRES_PARAM [no handles]
+
+        // ADJ_THR_STATE::ATS_ELEMENT [array of 8 pointers to ATS_ELEMENT]
+        for (int i = 0; i < 8; ++i)
+            persist_ATS_ELEMENT.readOrWrite(ptr->adjThrStateElem[i], td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static ADJ_THR_STATE_PersistInfo persist_ADJ_THR_STATE;
+
+
+struct QC_STATE_PersistInfo : SparseStructPersistInfo {
+    QC_STATE_PersistInfo()
+        : SparseStructPersistInfo(sizeof(QC_STATE))
+    {
+        SKIP_ARRAY_FIELD(QC_STATE, ELEMENT_BITS*, elementBits, 8);
+        SKIP_FIELD(QC_STATE, BITCNTR_STATE*, hBitCounter);
+        SKIP_FIELD(QC_STATE, ADJ_THR_STATE*, hAdjThr);
+    }
+
+    void traverse(QC_STATE *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // QC_STATE:
+        // QC_STATE::ELEMENT_BITS [array of 8 ELEMENT_BITS pointers]
+        for (int i = 0; i < 8; ++i)
+            persist_ELEMENT_BITS.readOrWrite(ptr->elementBits[i], td);
+
+        // QC_STATE::BITCNTR_STATE ptr
+        persist_BITCNTR_STATE.readOrWrite(ptr->hBitCounter, td);
+
+        // QC_STATE::ADJ_THR_STATE ptr
+        persist_ADJ_THR_STATE.traverse(ptr->hAdjThr, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static QC_STATE_PersistInfo persist_QC_STATE;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
+// QC_OUT
 
-static FIXME_TODO_StructPersistInfo_T<SBR_ENCODER> persist_SBR_ENCODER;
+static ContiguousStructPersistInfo_T<QC_OUT_CHANNEL> persist_QC_OUT_CHANNEL;
 
-// SBR_ENCODER:
-// SBR_ENCODER::HANDLE_SBR_ELEMENT
-                // SBR_ELEMENT ???
 
-            // SBR_ENCODER::HANDLE_SBR_CHANNEL
-         //   ?
-            // SBR_ENCODER::QMF_FILTER_BANK
-         //   ?
-            // SBR_ENCODER::DOWNSAMPLER
-         //   ?
-            // SBR_ENCODER::UCHAR* dynamicRam;
-         //   ?
-            // SBR_ENCODER::UCHAR* pSBRdynamic_RAM;
-         //   ?
-            // SBR_ENCODER::HANDLE_PARAMETRIC_STEREO
-         //   ?
-            // SBR_ENCODER::QMF_FILTER_BANK
-         //   ?
+struct QC_OUT_EXTENSION_PersistInfo : SparseStructPersistInfo {
+    QC_OUT_EXTENSION_PersistInfo()
+        : SparseStructPersistInfo(sizeof(QC_OUT_EXTENSION))
+    {
+        SKIP_FIELD(QC_OUT_EXTENSION, UCHAR*, pPayload);
+    }
+
+    void traverse(QC_OUT_EXTENSION *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // REVIEW
+        // .pPayload is a copy of extPayload[n].pData. shouldn't need to persist it
+
+        LEAVE_TRAVERSAL
+    }
+};
+static QC_OUT_EXTENSION_PersistInfo persist_QC_OUT_EXTENSION;
+
+
+struct QC_OUT_ELEMENT_PersistInfo : SparseStructPersistInfo {
+    QC_OUT_ELEMENT_PersistInfo()
+        : SparseStructPersistInfo(sizeof(QC_OUT_ELEMENT))
+    {
+        SKIP_ARRAY_FIELD(QC_OUT_ELEMENT, QC_OUT_EXTENSION, extension, 1);
+        SKIP_ARRAY_FIELD(QC_OUT_ELEMENT, QC_OUT_CHANNEL*, qcOutChannel, 2);
+    }
+
+    void traverse(QC_OUT_ELEMENT *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // QC_OUT_ELEMENT: 
+        // QC_OUT_ELEMENT::QC_OUT_EXTENSION
+        persist_QC_OUT_EXTENSION.traverse(&ptr->extension[1], td);
+
+        // QC_OUT_ELEMENT::PE_DATA [contiguous data]
+
+        // QC_OUT_ELEMENT::QC_OUT_CHANNEL  [array of 2 QC_OUT_CHANNEL ptrs]
+        for (int i = 0; i < 2; ++i)
+            persist_QC_OUT_CHANNEL.readOrWrite(ptr->qcOutChannel[i], td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static QC_OUT_ELEMENT_PersistInfo persist_QC_OUT_ELEMENT;
+
+
+struct QC_OUT_PersistInfo : SparseStructPersistInfo {
+    QC_OUT_PersistInfo()
+        : SparseStructPersistInfo(sizeof(QC_OUT))
+    {
+        SKIP_ARRAY_FIELD(QC_OUT, QC_OUT_ELEMENT*, qcElement, 8);
+        SKIP_ARRAY_FIELD(QC_OUT, QC_OUT_CHANNEL*, pQcOutChannels, 8);
+        SKIP_ARRAY_FIELD(QC_OUT, QC_OUT_EXTENSION, extension, (2+2));
+    }
+
+    void traverse(QC_OUT *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // QC_OUT:
+        // QC_OUT::QC_OUT_ELEMENT [array of 8 QC_OUT_ELEMENT ptrs]
+        for (int i=0; i < 8; ++i)
+            persist_QC_OUT_ELEMENT.traverse(ptr->qcElement[i], td);
+
+        // QC_OUT::QC_OUT_CHANNEL  [array of 8 QC_OUT_CHANNEL ptrs]
+        for (int i = 0; i < 8; ++i)
+            persist_QC_OUT_CHANNEL.readOrWrite(ptr->pQcOutChannels[i], td);
+        
+        // QC_OUT::QC_OUT_EXTENSION [array of 4 QC_OUT_EXTENSION ptrs]
+        for (int i = 0; i < 8; ++i)
+            persist_QC_OUT_EXTENSION.traverse(&ptr->extension[i], td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static QC_OUT_PersistInfo persist_QC_OUT;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// PSY_OUT
+
+struct PSY_OUT_CHANNEL_PersistInfo : SparseStructPersistInfo {
+    PSY_OUT_CHANNEL_PersistInfo()
+        : SparseStructPersistInfo(sizeof(PSY_OUT_CHANNEL))
+    {
+        // "memory located in QC_OUT_CHANNEL"
+        SKIP_FIELD(PSY_OUT_CHANNEL, FIXP_DBL*, mdctSpectrum);
+        SKIP_FIELD(PSY_OUT_CHANNEL, FIXP_DBL*, sfbEnergy);
+        SKIP_FIELD(PSY_OUT_CHANNEL, FIXP_DBL*, sfbSpreadEnergy);
+        SKIP_FIELD(PSY_OUT_CHANNEL, FIXP_DBL*, sfbThresholdLdData);
+        SKIP_FIELD(PSY_OUT_CHANNEL, FIXP_DBL*, sfbMinSnrLdData);
+        SKIP_FIELD(PSY_OUT_CHANNEL, FIXP_DBL*, sfbEnergyLdData);
+    }
+
+    void traverse(PSY_OUT_CHANNEL *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // PSY_OUT_CHANNEL:
+        // PSY_OUT_CHANNEL::TNS_INFO [flat struct of arrays of ints]
+
+        // PSY_OUT_CHANNEL::FIXP_DBL ptrs "memory located in QC_OUT_CHANNEL"
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PSY_OUT_CHANNEL_PersistInfo persist_PSY_OUT_CHANNEL;
+
+struct PSY_OUT_ELEMENT_PersistInfo : SparseStructPersistInfo {
+    PSY_OUT_ELEMENT_PersistInfo()
+        : SparseStructPersistInfo(sizeof(PSY_OUT_ELEMENT))
+    {
+        // "memory located in QC_OUT_CHANNEL"
+        SKIP_ARRAY_FIELD(PSY_OUT_ELEMENT, PSY_OUT_CHANNEL*, psyOutChannel, 2);
+    }
+
+    void traverse(PSY_OUT_ELEMENT *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // PSY_OUT_ELEMENT:
+        // PSY_OUT_ELEMENT::PSY_OUT_CHANNEL ptr[2] 
+        for (int i=0; i < 2; ++i)
+            persist_PSY_OUT_CHANNEL.traverse(ptr->psyOutChannel[i], td);
+
+        // PSY_OUT_ELEMENT::TOOLSINFO [flat struct]
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PSY_OUT_ELEMENT_PersistInfo persist_PSY_OUT_ELEMENT;
+
+
+struct PSY_OUT_PersistInfo {
+    void traverse(PSY_OUT *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        // PSY_OUT:
+        // PSY_OUT::PSY_OUT_ELEMENT ptr[8]
+        for (int i=0; i < 8; ++i)
+            persist_PSY_OUT_ELEMENT.traverse(ptr->psyOutElement[i], td);
+
+        // PSY_OUT::PSY_OUT_CHANNEL ptr[8] 
+        for (int i = 0; i < 8; ++i)
+            persist_PSY_OUT_CHANNEL.traverse(ptr->pPsyOutChannels[i], td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PSY_OUT_PersistInfo persist_PSY_OUT;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// PSY_INTERNAL
+
+struct PSY_STATIC_PersistInfo : SparseStructPersistInfo {
+    PSY_STATIC_PersistInfo()
+        : SparseStructPersistInfo(sizeof(PSY_STATIC))
+    {
+        SKIP_FIELD(PSY_STATIC, INT_PCM*, psyInputBuffer);
+    }
+
+    void traverse(PSY_STATIC *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // PSY_STATIC:
+        // PSY_STATIC::INT_PCM ptr psyInputBuffer
+
+        // REVIEW: psyInputBuffer is used as a (ring buffer?) input to psych. maybe don't need to save all of it, but for now...
+        readOrWriteStruct(ptr->psyInputBuffer, MAX_INPUT_BUFFER_SIZE*sizeof(INT_PCM), td);
+
+        // PSY_STATIC::BLOCK_SWITCHING_CONTROL [flat struct]
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PSY_STATIC_PersistInfo persist_PSY_STATIC;
+
+
+struct PSY_ELEMENT_PersistInfo {
+    void traverse(PSY_ELEMENT *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        // PSY_ELEMENT:
+        // PSY_ELEMENT::PSY_STATIC ptr[2]
+        for (int i = 0; i < 2; ++i)
+            persist_PSY_STATIC.traverse(ptr->psyStatic[i], td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PSY_ELEMENT_PersistInfo persist_PSY_ELEMENT;
+
+
+// PSY_DYNAMIC:
+// PSY_DYNAMIC::PSY_DATA [flat data]
+// PSY_DYNAMIC::TNS_DATA [flat data]
+// PSY_DYNAMIC::PNS_DATA [flat data]
+static ContiguousStructPersistInfo_T<PSY_DYNAMIC> persist_PSY_DYNAMIC;
+
+
+struct PSY_INTERNAL_PersistInfo : SparseStructPersistInfo {
+    PSY_INTERNAL_PersistInfo()
+        : SparseStructPersistInfo(sizeof(PSY_INTERNAL))
+    {
+        SKIP_ARRAY_FIELD(PSY_INTERNAL, PSY_ELEMENT*, psyElement, 8);
+        SKIP_ARRAY_FIELD(PSY_INTERNAL, PSY_STATIC*, pStaticChannels, 8);
+        SKIP_FIELD(PSY_INTERNAL, PSY_DYNAMIC*, psyDynamic);
+    }
+
+    void traverse(PSY_INTERNAL *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // PSY_INTERNAL:
+        // PSY_INTERNAL::PSY_CONFIGURATION [flat nested structs no pointers]
+
+        // PSY_INTERNAL::PSY_ELEMENT [array pf 8 pointers]
+        for (int i=0; i < 8; ++i)
+            persist_PSY_ELEMENT.traverse(ptr->psyElement[i], td);
+
+        // PSY_INTERNAL::PSY_STATIC [array pf 8 pointers]
+        for (int i = 0; i < 8; ++i)
+            persist_PSY_STATIC.traverse(ptr->pStaticChannels[i], td);
+
+        // PSY_INTERNAL::PSY_DYNAMIC ptr
+        persist_PSY_DYNAMIC.readOrWrite(ptr->psyDynamic, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PSY_INTERNAL_PersistInfo persist_PSY_INTERNAL;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
-static FIXME_TODO_StructPersistInfo_T<FDK_METADATA_ENCODER> persist_FDK_METADATA_ENCODER;
+static ContiguousStructPersistInfo_T<AACENC_CONFIG> persist_AACENC_CONFIG;
 
-// FDK_METADATA_ENCODER:
-                // FDK_METADATA_ENCODER::HDRC_COMP [flat structs]
-                // FDK_METADATA_ENCODER::AACENC_MetaData [flat struct]
-                // FDK_METADATA_ENCODER::AAC_METADATA [flat struct]
-                // FDK_METADATA_ENCODER::AACENC_EXT_PAYLOAD ->
-                    // AACENC_EXT_PAYLOAD:: ptr to data ??????????????????
+struct AAC_ENC_PersistInfo : SparseStructPersistInfo {
+    AAC_ENC_PersistInfo()
+        : SparseStructPersistInfo(sizeof(AAC_ENC))
+    {
+        SKIP_FIELD(AAC_ENC, AACENC_CONFIG*, config);
+        SKIP_FIELD(AAC_ENC, QC_STATE*, qcKernel);
+        SKIP_FIELD(AAC_ENC, QC_OUT*, qcOut[0]);
+        SKIP_FIELD(AAC_ENC, PSY_OUT*, psyOut[0]);
+        SKIP_FIELD(AAC_ENC, PSY_INTERNAL*, psyKernel);
+        SKIP_FIELD(AAC_ENC, FIXP_DBL*, dynamic_RAM);
+    }
+
+    void traverse(AAC_ENC *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // AAC_ENC:
+        // AAC_ENC::AACENC_CONFIG ptr -> AACENC_CONFIG [no handles]
+        persist_AACENC_CONFIG.readOrWrite(ptr->config, td);
+
+        // AAC_ENC::CHANNEL_MAPPING [contiguous storage with nested arrays, no ptrs]
+
+        // AAC_ENC::QC_STATE [pointer]
+        persist_QC_STATE.traverse(ptr->qcKernel, td);
+
+        // AAC_ENC::QC_OUT [pointer]
+        persist_QC_OUT.traverse(ptr->qcOut[0], td);
+
+        // AAC_ENC::PSY_OUT [pointer]
+        persist_PSY_OUT.traverse(ptr->psyOut[0], td);
+
+        // AAC_ENC::PSY_INTERNAL [pointer]
+        persist_PSY_INTERNAL.traverse(ptr->psyKernel, td);
+
+        // REVIEW: dynamic dynamic_RAM appears to be used for scratch storage during phase processing. prob. don't need to persist it.
+        // AAC_ENC::FIXP_DBL  *dynamic_RAM
+
+        LEAVE_TRAVERSAL
+    }
+};
+static AAC_ENC_PersistInfo persist_AAC_ENC;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
+struct FDK_BITBUF_PersistInfo : SparseStructPersistInfo {
+    FDK_BITBUF_PersistInfo()
+        : SparseStructPersistInfo(sizeof(FDK_BITBUF))
+    {
+        SKIP_FIELD(FDK_BITBUF, UCHAR*, Buffer);
+    }
 
-static FIXME_TODO_StructPersistInfo_T<TRANSPORTENC> persist_TRANSPORTENC;
+    void traverse(FDK_BITBUF *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
 
-// TRANSPORTENC ?
-            // ::CODER_CONFIG [flat struct]
+        readOrWrite_(ptr, td);
+        
+        // FDK_BITBUF::UCHAR * Buffer
+        readOrWriteStruct(ptr->Buffer, ptr->bufSize*sizeof(UCHAR), td);
 
-            // ::FDK_BITSTREAM::FDK_BITBUF
-            // UCHAR *Buffer;
-            // ::UCHAR *bsBuffer
+        LEAVE_TRAVERSAL
+    }
+};
+static FDK_BITBUF_PersistInfo persist_FDK_BITBUF;
 
-            // ::writer [union of flat structs]
+
+struct FDK_BITSTREAM_PersistInfo : SparseStructPersistInfo {
+    FDK_BITSTREAM_PersistInfo()
+        : SparseStructPersistInfo(sizeof(FDK_BITSTREAM))
+    {
+        SKIP_FIELD(FDK_BITSTREAM, FDK_BITBUF, hBitBuf);
+    }
+
+    void traverse(FDK_BITSTREAM *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        persist_FDK_BITBUF.traverse(&ptr->hBitBuf, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static FDK_BITSTREAM_PersistInfo persist_FDK_BITSTREAM;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// SBR_ENCODER
+
+struct LP_FILTER_PersistInfo : SparseStructPersistInfo {
+    LP_FILTER_PersistInfo()
+        : SparseStructPersistInfo(sizeof(LP_FILTER))
+    {
+        SKIP_FIELD(LP_FILTER, const FIXP_SGL *, coeffa);
+    }
+
+    void traverse(LP_FILTER *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // LP_FILTER::coeffa points to static filter parameter tables. don't save/load
+
+        LEAVE_TRAVERSAL
+    }
+};
+static LP_FILTER_PersistInfo persist_LP_FILTER;
+
+struct DOWNSAMPLER_PersistInfo : SparseStructPersistInfo {
+    DOWNSAMPLER_PersistInfo()
+        : SparseStructPersistInfo(sizeof(DOWNSAMPLER))
+    {
+        SKIP_FIELD(DOWNSAMPLER, LP_FILTER, downFilter);
+    }
+
+    void traverse(DOWNSAMPLER *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        persist_LP_FILTER.traverse(&ptr->downFilter, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static DOWNSAMPLER_PersistInfo persist_DOWNSAMPLER;
+
+
+struct SBR_CODE_ENVELOPE_PersistInfo : SparseStructPersistInfo {
+    SBR_CODE_ENVELOPE_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_CODE_ENVELOPE))
+    {
+        SKIP_FIELD(SBR_CODE_ENVELOPE, const UCHAR *, hufftableTimeL);
+        SKIP_FIELD(SBR_CODE_ENVELOPE, const UCHAR *, hufftableFreqL);
+        SKIP_FIELD(SBR_CODE_ENVELOPE, const UCHAR *, hufftableLevelTimeL);
+        SKIP_FIELD(SBR_CODE_ENVELOPE, const UCHAR *, hufftableBalanceTimeL);
+        SKIP_FIELD(SBR_CODE_ENVELOPE, const UCHAR *, hufftableLevelFreqL);
+        SKIP_FIELD(SBR_CODE_ENVELOPE, const UCHAR *, hufftableBalanceFreqL);
+    }
+
+    void traverse(SBR_CODE_ENVELOPE *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // REVIEW: these point to static tables
+        /*
+         const UCHAR *hufftableTimeL;
+         const UCHAR *hufftableFreqL;
+
+         const UCHAR *hufftableLevelTimeL;
+         const UCHAR *hufftableBalanceTimeL;
+         const UCHAR *hufftableLevelFreqL;
+         const UCHAR *hufftableBalanceFreqL;
+        */
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_CODE_ENVELOPE_PersistInfo persist_SBR_CODE_ENVELOPE;
+
+
+struct SBR_EXTRACT_ENVELOPE_PersistInfo : SparseStructPersistInfo {
+    SBR_EXTRACT_ENVELOPE_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_EXTRACT_ENVELOPE))
+    {
+        SKIP_ARRAY_FIELD(SBR_EXTRACT_ENVELOPE, FIXP_DBL *, rBuffer, QMF_MAX_TIME_SLOTS);
+        SKIP_ARRAY_FIELD(SBR_EXTRACT_ENVELOPE, FIXP_DBL *, iBuffer, QMF_MAX_TIME_SLOTS);
+        SKIP_FIELD(SBR_EXTRACT_ENVELOPE, FIXP_DBL *, p_YBuffer);
+        SKIP_ARRAY_FIELD(SBR_EXTRACT_ENVELOPE, FIXP_DBL *, YBuffer, QMF_MAX_TIME_SLOTS);
+    }
+
+    void traverse(SBR_EXTRACT_ENVELOPE *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // FIXME TODO: how to we persist these???????????????
+        /*
+        FIXP_DBL  *rBuffer[QMF_MAX_TIME_SLOTS];
+        FIXP_DBL  *iBuffer[QMF_MAX_TIME_SLOTS];
+
+        FIXP_DBL  *p_YBuffer;
+
+        FIXP_DBL  *YBuffer[QMF_MAX_TIME_SLOTS];
+        */
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_EXTRACT_ENVELOPE_PersistInfo persist_SBR_EXTRACT_ENVELOPE;
+
+
+struct SBR_ENVELOPE_FRAME_PersistInfo : SparseStructPersistInfo {
+    SBR_ENVELOPE_FRAME_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_ENVELOPE_FRAME))
+    {
+        SKIP_FIELD(SBR_ENVELOPE_FRAME, const int*, v_tuningSegm);
+        SKIP_FIELD(SBR_ENVELOPE_FRAME, const int*, v_tuningFreq);
+    }
+
+    void traverse(SBR_ENVELOPE_FRAME *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_ENVELOPE_FRAME:
+        // REVIEW v_tuningSegm static vector?
+        // REVIEW v_tuningFreq static vector?
+        // SBR_ENVELOPE_FRAME::SBR_GRID flat contiguous data structure
+        // SBR_ENVELOPE_FRAME::SBR_FRAME_INFO flat contiguous data structure
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_ENVELOPE_FRAME_PersistInfo persist_SBR_ENVELOPE_FRAME;
+
+struct GUIDE_VECTORS_PersistInfo  {
+    void traverse(GUIDE_VECTORS *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        // REVIEW: it looks like these are pointers into the value arrays in SBR_MISSING_HARMONICS_DETECTOR
+        // guideVectorDiff
+        // guideVectorOrig
+        // guideVectorDetected
+
+        LEAVE_TRAVERSAL
+    }
+};
+static GUIDE_VECTORS_PersistInfo persist_GUIDE_VECTORS;
+
+
+struct SBR_MISSING_HARMONICS_DETECTOR_PersistInfo : SparseStructPersistInfo {
+    SBR_MISSING_HARMONICS_DETECTOR_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_MISSING_HARMONICS_DETECTOR))
+    {
+        SKIP_FIELD(SBR_MISSING_HARMONICS_DETECTOR, UCHAR *, guideScfb);
+        SKIP_FIELD(SBR_MISSING_HARMONICS_DETECTOR, UCHAR *, prevEnvelopeCompensation);
+        SKIP_ARRAY_FIELD(SBR_MISSING_HARMONICS_DETECTOR, UCHAR *, detectionVectors, MAX_NO_OF_ESTIMATES);
+        SKIP_FIELD(SBR_MISSING_HARMONICS_DETECTOR, const DETECTOR_PARAMETERS_MH *, mhParams);
+        SKIP_ARRAY_FIELD(SBR_MISSING_HARMONICS_DETECTOR, GUIDE_VECTORS, guideVectors, MAX_NO_OF_ESTIMATES);
+    }
+
+    void traverse(SBR_MISSING_HARMONICS_DETECTOR *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // FIXME TODO guideScfb ????
+        // FIXME TODO prevEnvelopeCompensation ????
+        // FIXME TODO detectionVectors ????
+
+        // SBR_MISSING_HARMONICS_DETECTOR
+        // SBR_MISSING_HARMONICS_DETECTOR::DETECTOR_PARAMETERS_MH mhParams is initialised to static lookup tables
+
+        // SBR_MISSING_HARMONICS_DETECTOR::GUIDE_VECTORS // contains pointers
+        for (int i=0; i < MAX_NO_OF_ESTIMATES; ++i)
+            persist_GUIDE_VECTORS.traverse( &ptr->guideVectors[i], td );
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_MISSING_HARMONICS_DETECTOR_PersistInfo persist_SBR_MISSING_HARMONICS_DETECTOR;
+
+
+struct SBR_NOISE_FLOOR_ESTIMATE_PersistInfo : SparseStructPersistInfo {
+    SBR_NOISE_FLOOR_ESTIMATE_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_NOISE_FLOOR_ESTIMATE))
+    {
+        SKIP_FIELD(SBR_NOISE_FLOOR_ESTIMATE, const FIXP_DBL*, smoothFilter);
+    }
+
+    void traverse(SBR_NOISE_FLOOR_ESTIMATE *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_NOISE_FLOOR_ESTIMATE:
+        // SBR_NOISE_FLOOR_ESTIMATE::const FIXP_DBL *smoothFilter // REVIEW: pointer to static array of coefficients
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_NOISE_FLOOR_ESTIMATE_PersistInfo persist_SBR_NOISE_FLOOR_ESTIMATE;
+
+struct SBR_INV_FILT_EST_PersistInfo : SparseStructPersistInfo {
+    SBR_INV_FILT_EST_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_INV_FILT_EST))
+    {
+        SKIP_FIELD(SBR_INV_FILT_EST, const DETECTOR_PARAMETERS *, detectorParams);
+    }
+
+    void traverse(SBR_INV_FILT_EST *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_INV_FILT_EST:
+        // SBR_INV_FILT_EST::DETECTOR_PARAMETERS are static lookup tables
+
+        // SBR_INV_FILT_EST::DETECTOR_VALUES flat struct
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_INV_FILT_EST_PersistInfo persist_SBR_INV_FILT_EST;
+
+
+struct SBR_TON_CORR_EST_PersistInfo : SparseStructPersistInfo {
+    SBR_TON_CORR_EST_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_TON_CORR_EST))
+    {
+        SKIP_ARRAY_FIELD(SBR_TON_CORR_EST, INT *, signMatrix, MAX_NO_OF_ESTIMATES);
+        SKIP_ARRAY_FIELD(SBR_TON_CORR_EST, FIXP_DBL *, quotaMatrix, MAX_NO_OF_ESTIMATES);
+        SKIP_FIELD(SBR_TON_CORR_EST, SBR_MISSING_HARMONICS_DETECTOR, sbrMissingHarmonicsDetector);
+        SKIP_FIELD(SBR_TON_CORR_EST, SBR_NOISE_FLOOR_ESTIMATE, sbrNoiseFloorEstimate);
+        SKIP_FIELD(SBR_TON_CORR_EST, SBR_INV_FILT_EST, sbrInvFilt);
+    }
+
+    void traverse(SBR_TON_CORR_EST *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // FIXME TODO signMatrix ???
+        // FIXME TODO quotaMatrix ???
+
+        // PATCH_PARAM flat struct
+        // SBR_MISSING_HARMONICS_DETECTOR contains pointers
+        persist_SBR_MISSING_HARMONICS_DETECTOR.traverse(&ptr->sbrMissingHarmonicsDetector, td);
+
+        // SBR_NOISE_FLOOR_ESTIMATE contains pointers
+        persist_SBR_NOISE_FLOOR_ESTIMATE.traverse(&ptr->sbrNoiseFloorEstimate, td);
+
+        // SBR_INV_FILT_EST  contains pointers
+        persist_SBR_INV_FILT_EST.traverse(&ptr->sbrInvFilt, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_TON_CORR_EST_PersistInfo persist_SBR_TON_CORR_EST;
+
+
+static ContiguousStructPersistInfo_T<SBR_GRID> persist_SBR_GRID;
+
+struct SBR_ENV_DATA_PersistInfo : SparseStructPersistInfo {
+    SBR_ENV_DATA_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_ENV_DATA))
+    {
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableTimeC);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableFreqC);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableTimeL);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableFreqL);
+
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableLevelTimeC);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableBalanceTimeC);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableLevelFreqC);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableBalanceFreqC);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableLevelTimeL);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableBalanceTimeL);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableLevelFreqL);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableBalanceFreqL);
+
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableNoiseTimeL);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableNoiseTimeC);        
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableNoiseFreqL);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableNoiseFreqC);
+
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableNoiseLevelTimeL);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableNoiseLevelTimeC);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableNoiseBalanceTimeL);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableNoiseBalanceTimeC);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableNoiseLevelFreqL);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableNoiseLevelFreqC);
+        SKIP_FIELD(SBR_ENV_DATA, const UCHAR *, hufftableNoiseBalanceFreqL);
+        SKIP_FIELD(SBR_ENV_DATA, const INT *, hufftableNoiseBalanceFreqC);
+        
+        SKIP_FIELD(SBR_ENV_DATA, HANDLE_SBR_GRID, hSbrBSGrid);
+    }
+
+    void traverse(SBR_ENV_DATA *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_ENV_DATA:
+        /*
+        // FIXME TODO what to do with these?
+        const INT *hufftableTimeC;
+        const INT *hufftableFreqC;
+        const UCHAR *hufftableTimeL;
+        const UCHAR *hufftableFreqL;
+
+        const INT *hufftableLevelTimeC;
+        const INT *hufftableBalanceTimeC;
+        const INT *hufftableLevelFreqC;
+        const INT *hufftableBalanceFreqC;
+        const UCHAR *hufftableLevelTimeL;
+        const UCHAR *hufftableBalanceTimeL;
+        const UCHAR *hufftableLevelFreqL;
+        const UCHAR *hufftableBalanceFreqL;
+
+
+        const UCHAR *hufftableNoiseTimeL;
+        const INT *hufftableNoiseTimeC;
+        const UCHAR *hufftableNoiseFreqL;
+        const INT *hufftableNoiseFreqC;
+
+        const UCHAR *hufftableNoiseLevelTimeL;
+        const INT *hufftableNoiseLevelTimeC;
+        const UCHAR *hufftableNoiseBalanceTimeL;
+        const INT *hufftableNoiseBalanceTimeC;
+        const UCHAR *hufftableNoiseLevelFreqL;
+        const INT *hufftableNoiseLevelFreqC;
+        const UCHAR *hufftableNoiseBalanceFreqL;
+        const INT *hufftableNoiseBalanceFreqC;
+        */
+
+        //SBR_ENV_DATA::HANDLE_SBR_GRID
+        persist_SBR_GRID.readOrWrite(ptr->hSbrBSGrid, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_ENV_DATA_PersistInfo persist_SBR_ENV_DATA;
+
+
+struct ENV_CHANNEL_PersistInfo : SparseStructPersistInfo {
+    ENV_CHANNEL_PersistInfo()
+        : SparseStructPersistInfo(sizeof(ENV_CHANNEL))
+    {
+        SKIP_FIELD(ENV_CHANNEL, SBR_CODE_ENVELOPE, sbrCodeEnvelope);
+        SKIP_FIELD(ENV_CHANNEL, SBR_CODE_ENVELOPE, sbrCodeNoiseFloor);
+        SKIP_FIELD(ENV_CHANNEL, SBR_EXTRACT_ENVELOPE, sbrExtractEnvelope);
+        SKIP_FIELD(ENV_CHANNEL, SBR_ENVELOPE_FRAME, SbrEnvFrame);
+        SKIP_FIELD(ENV_CHANNEL, SBR_TON_CORR_EST, TonCorr);
+        SKIP_FIELD(ENV_CHANNEL, SBR_ENV_DATA, encEnvData);
+    }
+
+    void traverse(ENV_CHANNEL *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // ENV_CHANNEL:
+        // ENV_CHANNEL::SBR_TRANSIENT_DETECTOR flat contiguous struct
+
+        // ENV_CHANNEL::SBR_CODE_ENVELOPE contains pointers
+        persist_SBR_CODE_ENVELOPE.traverse(&ptr->sbrCodeEnvelope, td);
+
+        // ENV_CHANNEL::SBR_CODE_ENVELOPE contains pointers
+        persist_SBR_CODE_ENVELOPE.traverse(&ptr->sbrCodeNoiseFloor, td);
+
+        // ENV_CHANNEL::SBR_EXTRACT_ENVELOPE contains pointers
+        persist_SBR_EXTRACT_ENVELOPE.traverse(&ptr->sbrExtractEnvelope, td);
+
+        // ENV_CHANNEL::SBR_ENVELOPE_FRAME contains pointers
+        persist_SBR_ENVELOPE_FRAME.traverse(&ptr->SbrEnvFrame, td);
+
+        // ENV_CHANNEL::SBR_TON_CORR_EST contains pointers
+        persist_SBR_TON_CORR_EST.traverse(&ptr->TonCorr, td);
+
+        // ENV_CHANNEL::SBR_ENV_DATA contains pointers
+        persist_SBR_ENV_DATA.traverse(&ptr->encEnvData, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static ENV_CHANNEL_PersistInfo persist_ENV_CHANNEL;
+
+
+struct SBR_CHANNEL_PersistInfo {
+    void traverse(SBR_CHANNEL *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        // SBR_CHANNEL:
+        // SBR_CHANNEL::ENV_CHANNEL
+        persist_ENV_CHANNEL.traverse(&ptr->hEnvChannel, td);
+
+        // SBR_CHANNEL::DOWNSAMPLER
+        persist_DOWNSAMPLER.traverse(&ptr->downSampler, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_CHANNEL_PersistInfo persist_SBR_CHANNEL;
+
+
+struct QMF_FILTER_BANK_PersistInfo : SparseStructPersistInfo {
+    QMF_FILTER_BANK_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_CHANNEL))
+    {
+        SKIP_FIELD(QMF_FILTER_BANK, const FIXP_PFT *, p_filter);
+        SKIP_FIELD(QMF_FILTER_BANK, void *, FilterStates);
+        SKIP_FIELD(QMF_FILTER_BANK, const FIXP_QTW *, t_cos);
+        SKIP_FIELD(QMF_FILTER_BANK, const FIXP_QTW *, t_sin);
+    }
+
+    void traverse(QMF_FILTER_BANK *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // QMF_FILTER_BANK:
+        // QMF_FILTER_BANK::const FIXP_PFT *p_filter; // static lookup table
+        // QMF_FILTER_BANK::void *FilterStates; // FIXME TODO: not sure whether this is allocated or not
+        // QMF_FILTER_BANK::const FIXP_QTW *t_cos; // static lookup table
+        // QMF_FILTER_BANK::const FIXP_QTW *t_sin; // static lookup table
+
+        LEAVE_TRAVERSAL
+    }
+};
+static QMF_FILTER_BANK_PersistInfo persist_QMF_FILTER_BANK;
+
+
+struct SBR_CONFIG_DATA_PersistInfo : SparseStructPersistInfo {
+    SBR_CONFIG_DATA_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_CONFIG_DATA))
+    {
+        SKIP_ARRAY_FIELD(SBR_CONFIG_DATA, UCHAR *, freqBandTable, 2);
+        SKIP_FIELD(SBR_CONFIG_DATA, UCHAR *, v_k_master);
+    }
+
+    void traverse(SBR_CONFIG_DATA *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_CONFIG_DATA:
+        // SBR_CONFIG_DATA::UCHAR *freqBandTable[2]; // FIXME TODO ?????
+        // SBR_CONFIG_DATA::UCHAR *v_k_master; // FIXME TODO ?????
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_CONFIG_DATA_PersistInfo persist_SBR_CONFIG_DATA;
+
+
+struct COMMON_DATA_PersistInfo : SparseStructPersistInfo {
+    COMMON_DATA_PersistInfo()
+        : SparseStructPersistInfo(sizeof(COMMON_DATA))
+    {
+        SKIP_FIELD(COMMON_DATA, FDK_BITSTREAM, sbrBitbuf);
+        SKIP_FIELD(COMMON_DATA, FDK_BITSTREAM, tmpWriteBitbuf);
+    }
+
+    void traverse(COMMON_DATA *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // COMMON_DATA:
+        // COMMON_DATA::FDK_BITSTREAM
+        persist_FDK_BITSTREAM.traverse(&ptr->sbrBitbuf, td);
+        // COMMON_DATA::FDK_BITSTREAM
+        persist_FDK_BITSTREAM.traverse(&ptr->tmpWriteBitbuf, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static COMMON_DATA_PersistInfo persist_COMMON_DATA;
+
+
+struct SBR_ELEMENT_PersistInfo : SparseStructPersistInfo {
+    SBR_ELEMENT_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_ELEMENT))
+    {
+        SKIP_ARRAY_FIELD(SBR_ELEMENT, HANDLE_SBR_CHANNEL, sbrChannel, 2);
+        SKIP_ARRAY_FIELD(SBR_ELEMENT, QMF_FILTER_BANK*, hQmfAnalysis, 2);
+        SKIP_FIELD(SBR_ELEMENT, SBR_CONFIG_DATA, sbrConfigData);
+        SKIP_FIELD(SBR_ELEMENT, COMMON_DATA, CmonData);
+    }
+
+    void traverse(SBR_ELEMENT *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_ELEMENT:
+        // SBR_ELEMENT::HANDLE_SBR_CHANNEL [array of two handles]
+        for (int i = 0; i < 2; ++i)
+            persist_SBR_CHANNEL.traverse(ptr->sbrChannel[i], td);
+
+        // SBR_ELEMENT::QMF_FILTER_BANK [array of two pointers]
+        for (int i = 0; i < 2; ++i)
+            persist_QMF_FILTER_BANK.traverse(ptr->hQmfAnalysis[i], td);
+
+        // SBR_ELEMENT::SBR_CONFIG_DATA [contains pointers]
+        persist_SBR_CONFIG_DATA.traverse(&ptr->sbrConfigData, td);
+
+        // SBR_ELEMENT::SBR_HEADER_DATA contiguous embedded struct
+        // SBR_ELEMENT::SBR_BITSTREAM_DATA contiguous embedded struct
+        // SBR_ELEMENT::COMMON_DATA contains FDK_BITSTREAM which contains pointers
+        persist_COMMON_DATA.traverse(&ptr->CmonData, td);
+
+        // SBR_ELEMENT::SBR_ELEMENT_INFO contiguous embedded struct
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_ELEMENT_PersistInfo persist_SBR_ELEMENT;
+
+
+static ContiguousStructPersistInfo_T<PARAMETRIC_STEREO> persist_PARAMETRIC_STEREO;
+
+struct SBR_ENCODER_PersistInfo : SparseStructPersistInfo {
+    SBR_ENCODER_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_ENCODER))
+    {
+        SKIP_ARRAY_FIELD(SBR_ENCODER, HANDLE_SBR_ELEMENT, sbrElement, 8);
+        SKIP_ARRAY_FIELD(SBR_ENCODER, HANDLE_SBR_CHANNEL, pSbrChannel, 8);
+        SKIP_ARRAY_FIELD(SBR_ENCODER, QMF_FILTER_BANK, QmfAnalysis, 8);
+        SKIP_FIELD(SBR_ENCODER, DOWNSAMPLER, lfeDownSampler);
+        SKIP_FIELD(SBR_ENCODER, UCHAR*, dynamicRam);
+        SKIP_FIELD(SBR_ENCODER, UCHAR*, pSBRdynamic_RAM);
+        SKIP_FIELD(SBR_ENCODER, HANDLE_PARAMETRIC_STEREO*, hParametricStereo);
+        SKIP_FIELD(SBR_ENCODER, QMF_FILTER_BANK, qmfSynthesisPS);
+    }
+
+    void traverse(SBR_ENCODER *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_ENCODER:
+        // SBR_ENCODER::HANDLE_SBR_ELEMENT [array of 8 handles]
+        for (int i = 0; i < 8; ++i)
+            persist_SBR_ELEMENT.traverse(ptr->sbrElement[i], td);
+        
+        // SBR_ENCODER::HANDLE_SBR_CHANNEL [array of 8 handles]
+        for (int i = 0; i < 8; ++i)
+            persist_SBR_CHANNEL.traverse(ptr->pSbrChannel[i], td);
+
+        // SBR_ENCODER::QMF_FILTER_BANK [array of 8 QMF_FILTER_BANK]
+        for (int i = 0; i < 8; ++i)
+            persist_QMF_FILTER_BANK.traverse(&ptr->QmfAnalysis[i], td);
+
+        // SBR_ENCODER::DOWNSAMPLER
+        persist_DOWNSAMPLER.traverse(&ptr->lfeDownSampler, td);
+
+        // REVIEW: "dynamic RAM" is typically used for per-phase temp data, don't think we need to save it
+        // SBR_ENCODER::UCHAR* dynamicRam;
+        // SBR_ENCODER::UCHAR* pSBRdynamic_RAM;
+
+        // SBR_ENCODER::HANDLE_PARAMETRIC_STEREO [pointer to contiguous]
+        persist_PARAMETRIC_STEREO.readOrWrite(ptr->hParametricStereo, td);
+
+        // SBR_ENCODER::QMF_FILTER_BANK [QMF_FILTER_BANK]
+        persist_QMF_FILTER_BANK.traverse(&ptr->qmfSynthesisPS, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_ENCODER_PersistInfo persist_SBR_ENCODER;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -2458,14 +3370,90 @@ struct AACENC_EXT_PAYLOAD_PersistInfo : SparseStructPersistInfo {
 
     void traverse(AACENC_EXT_PAYLOAD *ptr, PersistenceTraversalData& td)
     {
+        ENTER_TRAVERSAL
+
         readOrWrite_(ptr, td);
 
+        // AACENC_EXT_PAYLOAD:
+        // AACENC_EXT_PAYLOAD:: ptr to data UCHAR *pData  FIXME TODO ??????????????????
         // REVIEW: AACENC_EXT_PAYLOAD::pData ptr. points where?
-        // assume that it points into extPayloadData
+        // ???assume that it points into extPayloadData
+
+        LEAVE_TRAVERSAL
     }
 };
-
 static AACENC_EXT_PAYLOAD_PersistInfo persist_AACENC_EXT_PAYLOAD;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// FDK_METADATA_ENCODER
+
+#include "metadata_main_private.h"
+
+struct FDK_METADATA_ENCODER_PersistInfo : SparseStructPersistInfo {
+    FDK_METADATA_ENCODER_PersistInfo()
+        : SparseStructPersistInfo(sizeof(FDK_METADATA_ENCODER))
+    {
+        SKIP_ARRAY_FIELD(FDK_METADATA_ENCODER, AACENC_EXT_PAYLOAD, exPayload, 2);
+    }
+
+    void traverse(FDK_METADATA_ENCODER *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // FDK_METADATA_ENCODER:
+        // FDK_METADATA_ENCODER::HDRC_COMP [flat structs]
+        // FDK_METADATA_ENCODER::AACENC_MetaData [flat struct]
+        // FDK_METADATA_ENCODER::AAC_METADATA [flat struct]
+
+        // FDK_METADATA_ENCODER::AACENC_EXT_PAYLOAD [two structs]
+
+        for (int i=0; i < 2; ++i)
+            persist_AACENC_EXT_PAYLOAD.traverse(&ptr->exPayload[i], td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static FDK_METADATA_ENCODER_PersistInfo persist_FDK_METADATA_ENCODER;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// TRANSPORTENC
+
+#include "../../libMpegTPEnc/src/tpenc_lib_private.h"
+
+struct TRANSPORTENC_PersistInfo : SparseStructPersistInfo {
+    TRANSPORTENC_PersistInfo()
+        : SparseStructPersistInfo(sizeof(TRANSPORTENC))
+    {
+        SKIP_FIELD(TRANSPORTENC, FDK_BITSTREAM, bitStream);
+        SKIP_FIELD(TRANSPORTENC, UCHAR*, bsBuffer);
+        SKIP_FIELD(TRANSPORTENC, CSTpCallBacks, callbacks);
+    }
+
+    void traverse(TRANSPORTENC *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        persist_FDK_BITSTREAM.traverse(&ptr->bitStream, td);
+
+        // TRANSPORTENC ?
+        // ::CODER_CONFIG [flat struct]
+
+        // ::FDK_BITSTREAM::FDK_BITBUF
+        // UCHAR *Buffer; // FIXME TODO do we back this up?
+        // ::UCHAR *bsBuffer
+
+        // ::writer [union of flat structs]
+
+        // ::CSTpCallBacks callbacks; [function pointers]
+
+        LEAVE_TRAVERSAL      
+    }
+};
+static TRANSPORTENC_PersistInfo persist_TRANSPORTENC;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -2485,6 +3473,8 @@ struct AACENCODER_PersistInfo : SparseStructPersistInfo {
 
     void traverse(AACENCODER *ptr, PersistenceTraversalData& td)
     {
+        ENTER_TRAVERSAL
+
         readOrWrite_(ptr, td);
 
         // AACENCODER:
@@ -2504,15 +3494,18 @@ struct AACENCODER_PersistInfo : SparseStructPersistInfo {
         // AACENCODER::HANDLE_TRANSPORTENC [ pointer to TRANSPORTENC struct ]
         persist_TRANSPORTENC.traverse(ptr->hTpEnc, td);
         
-        assert(false);
- // FIXME TODO:
         // AACENCODER:: UCHAR *outBuffer
-        // AACENCODER:: UCHAR *inputBuffer
+        readOrWriteStruct(ptr->outBuffer, ptr->outBufferInBytes, td);
 
+        // AACENCODER:: UCHAR *inputBuffer REVIEW
+        readOrWriteStruct(ptr->inputBuffer, sizeof(INT_PCM)*ptr->nMaxAacChannels*INPUTBUFFER_SIZE, td);
+        
         // AACENCODER::AACENC_EXT_PAYLOAD [ extPayload is an array of AACENC_EXT_PAYLOAD, each pointing to data ]
         for (int i=0; i < MAX_TOTAL_EXT_PAYLOADS; ++i) {
             persist_AACENC_EXT_PAYLOAD.traverse(&ptr->extPayload[i], td);
         }
+
+        LEAVE_TRAVERSAL
     }
 };
 static AACENCODER_PersistInfo persist_AACENCODER;
@@ -2521,14 +3514,18 @@ static AACENCODER_PersistInfo persist_AACENCODER;
 
 void aacEncoder_ExtSaveState(const HANDLE_AACENCODER hAacEncoder, void *fp)
 {
+    fprintf(stderr, "begin save state\n");
     PersistenceTraversalData td( PersistenceTraversalData::WRITE, (std::FILE*)fp );
     persist_AACENCODER.traverse(const_cast<HANDLE_AACENCODER>(hAacEncoder), td);
+    fprintf(stderr, "end save state\n");
 }
 
 void aacEncoder_ExtLoadState(HANDLE_AACENCODER hAacEncoder, void *fp)
 {
+    fprintf(stderr, "begin load state\n");
     PersistenceTraversalData td( PersistenceTraversalData::READ, (std::FILE*)fp );
     persist_AACENCODER.traverse(hAacEncoder, td);
+    fprintf(stderr, "end load state\n");
 }
 
 #endif /* RB_STATE_PERSISTENCE_EXTENSION */
