@@ -2132,8 +2132,10 @@ bail:
 #include <map>
 #include <vector>
 
+#include "metadata_main_private.h"
+#include "../../libMpegTPEnc/src/tpenc_lib_private.h"
 
-// FIXME: anonymous namespace?
+namespace { 
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -3387,8 +3389,6 @@ static AACENC_EXT_PAYLOAD_PersistInfo persist_AACENC_EXT_PAYLOAD;
 //////////////////////////////////////////////////////////////////////////////////////////////
 // FDK_METADATA_ENCODER
 
-#include "metadata_main_private.h"
-
 struct FDK_METADATA_ENCODER_PersistInfo : SparseStructPersistInfo {
     FDK_METADATA_ENCODER_PersistInfo()
         : SparseStructPersistInfo(sizeof(FDK_METADATA_ENCODER))
@@ -3419,8 +3419,6 @@ static FDK_METADATA_ENCODER_PersistInfo persist_FDK_METADATA_ENCODER;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 // TRANSPORTENC
-
-#include "../../libMpegTPEnc/src/tpenc_lib_private.h"
 
 struct TRANSPORTENC_PersistInfo : SparseStructPersistInfo {
     TRANSPORTENC_PersistInfo()
@@ -3512,20 +3510,22 @@ static AACENCODER_PersistInfo persist_AACENCODER;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
+} // end anonymous namespace
+
 void aacEncoder_ExtSaveState(const HANDLE_AACENCODER hAacEncoder, void *fp)
 {
-    fprintf(stderr, "begin save state\n");
+    //fprintf(stderr, "begin save state\n");
     PersistenceTraversalData td( PersistenceTraversalData::WRITE, (std::FILE*)fp );
     persist_AACENCODER.traverse(const_cast<HANDLE_AACENCODER>(hAacEncoder), td);
-    fprintf(stderr, "end save state\n");
+    //fprintf(stderr, "end save state\n");
 }
 
 void aacEncoder_ExtLoadState(HANDLE_AACENCODER hAacEncoder, void *fp)
 {
-    fprintf(stderr, "begin load state\n");
+    //fprintf(stderr, "begin load state\n");
     PersistenceTraversalData td( PersistenceTraversalData::READ, (std::FILE*)fp );
     persist_AACENCODER.traverse(hAacEncoder, td);
-    fprintf(stderr, "end load state\n");
+    //fprintf(stderr, "end load state\n");
 }
 
 #endif /* RB_STATE_PERSISTENCE_EXTENSION */
