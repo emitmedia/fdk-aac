@@ -1428,7 +1428,6 @@ AACENC_ERROR aacEncEncode(
      * Adjust user settings and trigger reinitialization.
      */
     if (hAacEncoder->InitFlags!=0) {
-
         err = aacEncInit(hAacEncoder,
                          hAacEncoder->InitFlags,
                         &hAacEncoder->extParam);
@@ -2133,7 +2132,10 @@ bail:
 #include <vector>
 
 #include "metadata_main_private.h"
+#include "metadata_compressor_private.h"
 #include "../../libMpegTPEnc/src/tpenc_lib_private.h"
+
+//#define RB_PRINT_TRACE
 
 namespace { 
 
@@ -2161,7 +2163,9 @@ struct PersistenceTraversalData {
         intptr_t iptr = (intptr_t)ptr;
 
         if (traversedRanges_.empty()) {    
+#ifdef RB_PRINT_TRACE
             //fprintf(stderr, "%p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
             return true;
         } else {
             std::map<intptr_t, size_t>::iterator i = traversedRanges_.upper_bound(iptr); // returns next key strictly after iptr
@@ -2172,7 +2176,9 @@ struct PersistenceTraversalData {
                 // range has already been persisted
                 return false;
             } else {
+#ifdef RB_PRINT_TRACE
                 //fprintf(stderr, "%p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
                 return true;
             }
         }
@@ -2190,19 +2196,28 @@ struct PersistenceTraversalData {
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
-void writeStruct(const void* p, size_t size, FILE *fp)
+void writeStruct(const void* ptr, size_t size, FILE *fp)
 {
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "writeStruct: %p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
+
     std::fwrite(&size, sizeof(size_t), 1, fp);
-    std::fwrite(p, size, 1, fp);
+    std::fwrite(ptr, size, 1, fp);
 }
 
-void readStruct(void* p, size_t size, FILE *fp)
+void readStruct(void* ptr, size_t size, FILE *fp)
 {
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "readStruct: %p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
+
     size_t persistedStorageSize = 0;
     std::fread(&persistedStorageSize, sizeof(size_t), 1, fp);
     if (persistedStorageSize != size)
-        throw "ERROR: file storage layout does not match memory format";
-    std::fread(p, size, 1, fp);
+        throw std::length_error("ERROR: file storage layout does not match memory format");
+
+    std::fread(ptr, size, 1, fp);
 }
 
 void readOrWriteStruct(void *ptr, size_t size, PersistenceTraversalData& td)
@@ -2234,25 +2249,40 @@ class SparseStructPersistInfo {
 
     void write_(const void *ptr, FILE *fp)
     {
+#ifdef RB_PRINT_TRACE
+        fprintf(stderr, "SparseStructPersistInfo::write_: %p %d\n", (void*)ptr, storageSize_);
+#endif /* RB_PRINT_TRACE */
+
         const uint8_t *p = (const uint8_t*)ptr;
         std::fwrite(&storageSize_, sizeof(size_t), 1, fp);
+
+        size_t n=0;
         for (std::vector<Range>::iterator i = ranges_.begin(); i != ranges_.end(); ++i) {
             std::fwrite(&p[i->begin], (i->end - i->begin), 1, fp);
+            n += (i->end - i->begin);
         }
+        assert( n == storageSize_ );
     }
 
     void read_(void *ptr, FILE *fp)
     {
+#ifdef RB_PRINT_TRACE
+        fprintf(stderr, "SparseStructPersistInfo::read_: %p %d\n", (void*)ptr, storageSize_);
+#endif /* RB_PRINT_TRACE */
+
         uint8_t *p = (uint8_t*)ptr;
 
-        size_t persistedStorageSize;
+        size_t persistedStorageSize = 0;
         std::fread(&persistedStorageSize, sizeof(size_t), 1, fp);
         if (persistedStorageSize != storageSize_)
-            throw "ERROR: file storage layout does not match memory format";
-
+            throw std::length_error("ERROR: file storage layout does not match memory format");
+            
+        size_t n=0;
         for (std::vector<Range>::iterator i = ranges_.begin(); i != ranges_.end(); ++i) {
             std::fread(&p[i->begin], (i->end - i->begin), 1, fp);
+            n += (i->end - i->begin);
         }
+        assert( n == storageSize_ );
     }
 
 public:
@@ -2329,21 +2359,6 @@ struct ContiguousStructPersistInfo_T { // used for structs with no ptrs, where a
         readOrWriteStruct(ptr, sizeof(T), td);
 
         LEAVE_TRAVERSAL
-    }
-};
-
-//////////////////////////////////////////////////////////////////////////////////////////////
-
-template <typename T>
-struct FIXME_TODO_StructPersistInfo_T { // placeholder for structs that haven't been handled yet
-    void readOrWrite(T *ptr, PersistenceTraversalData& td)
-    {
-        assert(false);
-    }
-
-    void traverse(T *ptr, PersistenceTraversalData& td)
-    {
-        assert(false);
     }
 };
 
@@ -2723,7 +2738,7 @@ struct AAC_ENC_PersistInfo : SparseStructPersistInfo {
         // AAC_ENC::PSY_INTERNAL [pointer]
         persist_PSY_INTERNAL.traverse(ptr->psyKernel, td);
 
-        // REVIEW: dynamic dynamic_RAM appears to be used for scratch storage during phase processing. prob. don't need to persist it.
+        // REVIEW: dynamic dynamic_RAM is typically used to allocate sub-structures. we persist the structures, so don't need to save the RAM.
         // AAC_ENC::FIXP_DBL  *dynamic_RAM
 
         LEAVE_TRAVERSAL
@@ -2737,6 +2752,8 @@ struct FDK_BITBUF_PersistInfo : SparseStructPersistInfo {
         : SparseStructPersistInfo(sizeof(FDK_BITBUF))
     {
         SKIP_FIELD(FDK_BITBUF, UCHAR*, Buffer);
+        SKIP_FIELD(FDK_BITBUF, UINT, bufSize);
+        SKIP_FIELD(FDK_BITBUF, UINT, bufBits);
     }
 
     void traverse(FDK_BITBUF *ptr, PersistenceTraversalData& td)
@@ -2745,8 +2762,12 @@ struct FDK_BITBUF_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
         
-        // FDK_BITBUF::UCHAR * Buffer
-        readOrWriteStruct(ptr->Buffer, ptr->bufSize*sizeof(UCHAR), td);
+        // The following FDK_BITBUF fields are initialized from another buffer. We don't save them here.
+        /*
+        UCHAR *Buffer;
+        UINT   bufSize;
+        UINT   bufBits;
+        */
 
         LEAVE_TRAVERSAL
     }
@@ -2836,7 +2857,7 @@ struct SBR_CODE_ENVELOPE_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
 
-        // REVIEW: these point to static tables
+        // these point to static tables
         /*
          const UCHAR *hufftableTimeL;
          const UCHAR *hufftableFreqL;
@@ -2869,7 +2890,7 @@ struct SBR_EXTRACT_ENVELOPE_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
 
-        // FIXME TODO: how to we persist these???????????????
+        // should we persist these? REVIEW: i think they are temp buffers.
         /*
         FIXP_DBL  *rBuffer[QMF_MAX_TIME_SLOTS];
         FIXP_DBL  *iBuffer[QMF_MAX_TIME_SLOTS];
@@ -2900,8 +2921,13 @@ struct SBR_ENVELOPE_FRAME_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // SBR_ENVELOPE_FRAME:
-        // REVIEW v_tuningSegm static vector?
-        // REVIEW v_tuningFreq static vector?
+
+        // v_tuningSegm [static vector]
+        // v_tuningSegm is assigned in FDKsbrEnc_frameInfoGenerator() from the v_tuning parameter.
+        // this is initialized in the caller FDKsbrEnc_frameInfoGenerator() from a static array.
+
+        // v_tuningFreq [unused]
+
         // SBR_ENVELOPE_FRAME::SBR_GRID flat contiguous data structure
         // SBR_ENVELOPE_FRAME::SBR_FRAME_INFO flat contiguous data structure
 
@@ -2915,11 +2941,10 @@ struct GUIDE_VECTORS_PersistInfo  {
     {
         ENTER_TRAVERSAL
 
-        // REVIEW: it looks like these are pointers into the value arrays in SBR_MISSING_HARMONICS_DETECTOR
-        // guideVectorDiff
-        // guideVectorOrig
-        // guideVectorDetected
-
+        readOrWriteStruct(ptr->guideVectorDiff, sizeof(FIXP_DBL)*MAX_FREQ_COEFFS, td);
+        readOrWriteStruct(ptr->guideVectorOrig, sizeof(FIXP_DBL)*MAX_FREQ_COEFFS, td);
+        readOrWriteStruct(ptr->guideVectorDetected, sizeof(UCHAR)*MAX_FREQ_COEFFS, td);
+        
         LEAVE_TRAVERSAL
     }
 };
@@ -2943,10 +2968,11 @@ struct SBR_MISSING_HARMONICS_DETECTOR_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
 
-        // FIXME TODO guideScfb ????
-        // FIXME TODO prevEnvelopeCompensation ????
-        // FIXME TODO detectionVectors ????
-
+        readOrWriteStruct(ptr->guideScfb, sizeof(UCHAR)*MAX_FREQ_COEFFS, td);
+        readOrWriteStruct(ptr->prevEnvelopeCompensation, sizeof(UCHAR)*MAX_FREQ_COEFFS, td);
+        for (int i=0; i < MAX_NO_OF_ESTIMATES; ++i)
+            readOrWriteStruct(ptr->detectionVectors[i], sizeof(UCHAR)*MAX_FREQ_COEFFS, td);
+        
         // SBR_MISSING_HARMONICS_DETECTOR
         // SBR_MISSING_HARMONICS_DETECTOR::DETECTOR_PARAMETERS_MH mhParams is initialised to static lookup tables
 
@@ -2974,7 +3000,7 @@ struct SBR_NOISE_FLOOR_ESTIMATE_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // SBR_NOISE_FLOOR_ESTIMATE:
-        // SBR_NOISE_FLOOR_ESTIMATE::const FIXP_DBL *smoothFilter // REVIEW: pointer to static array of coefficients
+        // SBR_NOISE_FLOOR_ESTIMATE::const FIXP_DBL *smoothFilter [pointer to static array of coefficients]
 
         LEAVE_TRAVERSAL
     }
@@ -3022,8 +3048,11 @@ struct SBR_TON_CORR_EST_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
 
-        // FIXME TODO signMatrix ???
-        // FIXME TODO quotaMatrix ???
+        for (int i=0; i < MAX_NO_OF_ESTIMATES; ++i)
+            readOrWriteStruct(ptr->signMatrix[i], sizeof(INT)*ptr->noQmfChannels, td);
+
+        for (int i = 0; i < MAX_NO_OF_ESTIMATES; ++i)
+            readOrWriteStruct(ptr->quotaMatrix[i], sizeof(FIXP_DBL)*ptr->noQmfChannels, td);
 
         // PATCH_PARAM flat struct
         // SBR_MISSING_HARMONICS_DETECTOR contains pointers
@@ -3086,7 +3115,7 @@ struct SBR_ENV_DATA_PersistInfo : SparseStructPersistInfo {
 
         // SBR_ENV_DATA:
         /*
-        // FIXME TODO what to do with these?
+        // REVIEW: I believe these are all static lookup tables
         const INT *hufftableTimeC;
         const INT *hufftableFreqC;
         const UCHAR *hufftableTimeL;
@@ -3191,7 +3220,7 @@ static SBR_CHANNEL_PersistInfo persist_SBR_CHANNEL;
 
 struct QMF_FILTER_BANK_PersistInfo : SparseStructPersistInfo {
     QMF_FILTER_BANK_PersistInfo()
-        : SparseStructPersistInfo(sizeof(SBR_CHANNEL))
+        : SparseStructPersistInfo(sizeof(QMF_FILTER_BANK))
     {
         SKIP_FIELD(QMF_FILTER_BANK, const FIXP_PFT *, p_filter);
         SKIP_FIELD(QMF_FILTER_BANK, void *, FilterStates);
@@ -3199,7 +3228,7 @@ struct QMF_FILTER_BANK_PersistInfo : SparseStructPersistInfo {
         SKIP_FIELD(QMF_FILTER_BANK, const FIXP_QTW *, t_sin);
     }
 
-    void traverse(QMF_FILTER_BANK *ptr, PersistenceTraversalData& td)
+    void traverse(QMF_FILTER_BANK *ptr, size_t stateSize, PersistenceTraversalData& td)
     {
         ENTER_TRAVERSAL
 
@@ -3207,7 +3236,14 @@ struct QMF_FILTER_BANK_PersistInfo : SparseStructPersistInfo {
 
         // QMF_FILTER_BANK:
         // QMF_FILTER_BANK::const FIXP_PFT *p_filter; // static lookup table
-        // QMF_FILTER_BANK::void *FilterStates; // FIXME TODO: not sure whether this is allocated or not
+        
+        // QMF_FILTER_BANK::void *FilterStates;           /*!< Pointer to buffer of filter states
+        //                             FIXP_PCM in analyse and
+        //                             FIXP_DBL in synthesis filter */
+
+        size_t filterStatesSize = (2*QMF_NO_POLY-1)*ptr->no_channels*stateSize;
+        readOrWriteStruct(ptr->FilterStates, filterStatesSize, td);
+
         // QMF_FILTER_BANK::const FIXP_QTW *t_cos; // static lookup table
         // QMF_FILTER_BANK::const FIXP_QTW *t_sin; // static lookup table
 
@@ -3232,9 +3268,13 @@ struct SBR_CONFIG_DATA_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // SBR_CONFIG_DATA:
-        // SBR_CONFIG_DATA::UCHAR *freqBandTable[2]; // FIXME TODO ?????
-        // SBR_CONFIG_DATA::UCHAR *v_k_master; // FIXME TODO ?????
+        // SBR_CONFIG_DATA::UCHAR *freqBandTable[2];
+        readOrWriteStruct(ptr->freqBandTable[FREQ_RES_LOW], sizeof(UCHAR)*(MAX_FREQ_COEFFS/2+1), td);
+        readOrWriteStruct(ptr->freqBandTable[FREQ_RES_HIGH], sizeof(UCHAR)*(MAX_FREQ_COEFFS+1), td);
 
+        // SBR_CONFIG_DATA::UCHAR *v_k_master;
+        readOrWriteStruct(ptr->v_k_master, sizeof(UCHAR)*(MAX_FREQ_COEFFS+1), td);
+        
         LEAVE_TRAVERSAL
     }
 };
@@ -3255,9 +3295,12 @@ struct COMMON_DATA_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
 
+        // these bitstreams are inited with buffers from from hSbrElement->payloadDelayLine
+
         // COMMON_DATA:
         // COMMON_DATA::FDK_BITSTREAM
         persist_FDK_BITSTREAM.traverse(&ptr->sbrBitbuf, td);
+
         // COMMON_DATA::FDK_BITSTREAM
         persist_FDK_BITSTREAM.traverse(&ptr->tmpWriteBitbuf, td);
 
@@ -3290,7 +3333,7 @@ struct SBR_ELEMENT_PersistInfo : SparseStructPersistInfo {
 
         // SBR_ELEMENT::QMF_FILTER_BANK [array of two pointers]
         for (int i = 0; i < 2; ++i)
-            persist_QMF_FILTER_BANK.traverse(ptr->hQmfAnalysis[i], td);
+            persist_QMF_FILTER_BANK.traverse(ptr->hQmfAnalysis[i], sizeof(FIXP_QAS), td);
 
         // SBR_ELEMENT::SBR_CONFIG_DATA [contains pointers]
         persist_SBR_CONFIG_DATA.traverse(&ptr->sbrConfigData, td);
@@ -3307,8 +3350,84 @@ struct SBR_ELEMENT_PersistInfo : SparseStructPersistInfo {
 };
 static SBR_ELEMENT_PersistInfo persist_SBR_ELEMENT;
 
+static ContiguousStructPersistInfo_T<PS_ENCODE> persist_PS_ENCODE;
 
-static ContiguousStructPersistInfo_T<PARAMETRIC_STEREO> persist_PARAMETRIC_STEREO;
+struct FDK_ANA_HYB_FILTER_PersistInfo : SparseStructPersistInfo {
+    FDK_ANA_HYB_FILTER_PersistInfo()
+        : SparseStructPersistInfo(sizeof(FDK_ANA_HYB_FILTER))
+    {
+        SKIP_ARRAY_FIELD(FDK_ANA_HYB_FILTER, FIXP_DBL*, bufferLFReal, 3);
+        SKIP_ARRAY_FIELD(FDK_ANA_HYB_FILTER, FIXP_DBL*, bufferLFImag, 3);
+        SKIP_ARRAY_FIELD(FDK_ANA_HYB_FILTER, FIXP_DBL*, bufferHFReal, 13);
+        SKIP_ARRAY_FIELD(FDK_ANA_HYB_FILTER, FIXP_DBL*, bufferHFImag, 13);
+
+        SKIP_FIELD(FDK_ANA_HYB_FILTER, FIXP_DBL*, pLFmemory);
+        SKIP_FIELD(FDK_ANA_HYB_FILTER, FIXP_DBL*, pHFmemory);
+        SKIP_FIELD(FDK_ANA_HYB_FILTER, UINT, LFmemorySize);
+        SKIP_FIELD(FDK_ANA_HYB_FILTER, UINT, HFmemorySize);
+
+        SKIP_FIELD(FDK_ANA_HYB_FILTER, HANDLE_FDK_HYBRID_SETUP, pSetup);
+    }
+
+    void traverse(FDK_ANA_HYB_FILTER *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // FDK_ANA_HYB_FILTER:
+        // bufferLFReal, bufferLFImag, bufferHFReal, bufferHFImag
+        // are inited out of pLFmemory and pHFmemory,
+        // which use  PARAMETRIC_STEREO::__staticHybAnaStatesLF and  PARAMETRIC_STEREO::__staticHybAnaStatesHF for storage.
+        // these have already been persisted by PARAMETRIC_STEREO_PersistInfo
+
+        // FDK_ANA_HYB_FILTER::HANDLE_FDK_HYBRID_SETUP [static data]
+
+        LEAVE_TRAVERSAL
+    }
+};
+static FDK_ANA_HYB_FILTER_PersistInfo persist_FDK_ANA_HYB_FILTER;
+
+
+struct PARAMETRIC_STEREO_PersistInfo : SparseStructPersistInfo {
+    PARAMETRIC_STEREO_PersistInfo()
+        : SparseStructPersistInfo(sizeof(PARAMETRIC_STEREO))
+    {
+        SKIP_FIELD(PARAMETRIC_STEREO, HANDLE_PS_ENCODE, hPsEncode);
+        SKIP_ARRAY_FIELD(PARAMETRIC_STEREO, FIXP_DBL*, pHybridData, ((HYBRID_READ_OFFSET+HYBRID_FRAMESIZE)*(MAX_PS_CHANNELS)*2) );
+        SKIP_ARRAY_FIELD(PARAMETRIC_STEREO, FDK_ANA_HYB_FILTER, fdkHybAnaFilter, MAX_PS_CHANNELS);
+        SKIP_FIELD(PARAMETRIC_STEREO, FDK_SYN_HYB_FILTER, fdkHybSynFilter);
+    }
+
+    void traverse(PARAMETRIC_STEREO *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // PS_ENCODE: contiguous struct
+        // PS_ENCODE::PS_DATA flat struct
+        // PS_ENCODE::PS_BANDS enum
+        persist_PS_ENCODE.readOrWrite(ptr->hPsEncode, td);
+
+        // PARAMETRIC_STEREO::FIXP_DBL *pHybridData
+        // pHybridData is configured to point to some __staticHybridData (already persisted)
+        // and some dynamic_RAM (presumably not needed between passes)
+
+        // PARAMETRIC_STEREO::FDK_ANA_HYB_FILTER [array of MAX_PS_CHANNELS analysis filters]
+        for (int i=0; i < MAX_PS_CHANNELS; ++i) {
+            persist_FDK_ANA_HYB_FILTER.traverse(&ptr->fdkHybAnaFilter[i], td);
+        }
+
+        // PARAMETRIC_STEREO::FDK_SYN_HYB_FILTER [immutable, don't bother saving]
+        // nrBands, cplxBands init time only
+        // FDK_SYN_HYB_FILTER::HANDLE_FDK_HYBRID_SETUP [ static filter data ]
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PARAMETRIC_STEREO_PersistInfo persist_PARAMETRIC_STEREO;
+
 
 struct SBR_ENCODER_PersistInfo : SparseStructPersistInfo {
     SBR_ENCODER_PersistInfo()
@@ -3341,20 +3460,20 @@ struct SBR_ENCODER_PersistInfo : SparseStructPersistInfo {
 
         // SBR_ENCODER::QMF_FILTER_BANK [array of 8 QMF_FILTER_BANK]
         for (int i = 0; i < 8; ++i)
-            persist_QMF_FILTER_BANK.traverse(&ptr->QmfAnalysis[i], td);
+            persist_QMF_FILTER_BANK.traverse(&ptr->QmfAnalysis[i], sizeof(FIXP_QAS), td);
 
         // SBR_ENCODER::DOWNSAMPLER
         persist_DOWNSAMPLER.traverse(&ptr->lfeDownSampler, td);
 
-        // REVIEW: "dynamic RAM" is typically used for per-phase temp data, don't think we need to save it
+        // REVIEW: "dynamic RAM" is typically used to allocate additional storage
         // SBR_ENCODER::UCHAR* dynamicRam;
         // SBR_ENCODER::UCHAR* pSBRdynamic_RAM;
 
-        // SBR_ENCODER::HANDLE_PARAMETRIC_STEREO [pointer to contiguous]
-        persist_PARAMETRIC_STEREO.readOrWrite(ptr->hParametricStereo, td);
+        // SBR_ENCODER::HANDLE_PARAMETRIC_STEREO
+        persist_PARAMETRIC_STEREO.traverse(ptr->hParametricStereo, td);
 
         // SBR_ENCODER::QMF_FILTER_BANK [QMF_FILTER_BANK]
-        persist_QMF_FILTER_BANK.traverse(&ptr->qmfSynthesisPS, td);
+        persist_QMF_FILTER_BANK.traverse(&ptr->qmfSynthesisPS, sizeof(FIXP_QSS), td);
 
         LEAVE_TRAVERSAL
     }
@@ -3377,9 +3496,11 @@ struct AACENC_EXT_PAYLOAD_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // AACENC_EXT_PAYLOAD:
-        // AACENC_EXT_PAYLOAD:: ptr to data UCHAR *pData  FIXME TODO ??????????????????
-        // REVIEW: AACENC_EXT_PAYLOAD::pData ptr. points where?
-        // ???assume that it points into extPayloadData
+        // AACENC_EXT_PAYLOAD:: ptr to data UCHAR *pData 
+        // REVIEW: AACENC_EXT_PAYLOAD::pData ptr may point to storage persisted elsewhere?
+        
+        //if (ptr->pData)
+        //    readOrWriteStruct(ptr->pData, ptr->dataSize, td);
 
         LEAVE_TRAVERSAL
     }
@@ -3389,10 +3510,13 @@ static AACENC_EXT_PAYLOAD_PersistInfo persist_AACENC_EXT_PAYLOAD;
 //////////////////////////////////////////////////////////////////////////////////////////////
 // FDK_METADATA_ENCODER
 
+static ContiguousStructPersistInfo_T<DRC_COMP> persist_DRC_COMP;
+
 struct FDK_METADATA_ENCODER_PersistInfo : SparseStructPersistInfo {
     FDK_METADATA_ENCODER_PersistInfo()
         : SparseStructPersistInfo(sizeof(FDK_METADATA_ENCODER))
     {
+        SKIP_FIELD(FDK_METADATA_ENCODER, HDRC_COMP, hDrcComp);
         SKIP_ARRAY_FIELD(FDK_METADATA_ENCODER, AACENC_EXT_PAYLOAD, exPayload, 2);
     }
 
@@ -3404,6 +3528,8 @@ struct FDK_METADATA_ENCODER_PersistInfo : SparseStructPersistInfo {
 
         // FDK_METADATA_ENCODER:
         // FDK_METADATA_ENCODER::HDRC_COMP [flat structs]
+        persist_DRC_COMP.readOrWrite(ptr->hDrcComp, td);
+
         // FDK_METADATA_ENCODER::AACENC_MetaData [flat struct]
         // FDK_METADATA_ENCODER::AAC_METADATA [flat struct]
 
@@ -3426,6 +3552,7 @@ struct TRANSPORTENC_PersistInfo : SparseStructPersistInfo {
     {
         SKIP_FIELD(TRANSPORTENC, FDK_BITSTREAM, bitStream);
         SKIP_FIELD(TRANSPORTENC, UCHAR*, bsBuffer);
+        SKIP_FIELD(TRANSPORTENC, INT, bsBufferSize);
         SKIP_FIELD(TRANSPORTENC, CSTpCallBacks, callbacks);
     }
 
@@ -3435,15 +3562,14 @@ struct TRANSPORTENC_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
 
-        persist_FDK_BITSTREAM.traverse(&ptr->bitStream, td);
-
-        // TRANSPORTENC ?
+        // TRANSPORTENC
         // ::CODER_CONFIG [flat struct]
 
-        // ::FDK_BITSTREAM::FDK_BITBUF
-        // UCHAR *Buffer; // FIXME TODO do we back this up?
-        // ::UCHAR *bsBuffer
+        persist_FDK_BITSTREAM.traverse(&ptr->bitStream, td);
 
+        // storage for ptr->bitStream
+        readOrWriteStruct(ptr->bsBuffer, ptr->bsBufferSize, td);
+    
         // ::writer [union of flat structs]
 
         // ::CSTpCallBacks callbacks; [function pointers]
@@ -3495,7 +3621,7 @@ struct AACENCODER_PersistInfo : SparseStructPersistInfo {
         // AACENCODER:: UCHAR *outBuffer
         readOrWriteStruct(ptr->outBuffer, ptr->outBufferInBytes, td);
 
-        // AACENCODER:: UCHAR *inputBuffer REVIEW
+        // AACENCODER:: UCHAR *inputBuffer
         readOrWriteStruct(ptr->inputBuffer, sizeof(INT_PCM)*ptr->nMaxAacChannels*INPUTBUFFER_SIZE, td);
         
         // AACENCODER::AACENC_EXT_PAYLOAD [ extPayload is an array of AACENC_EXT_PAYLOAD, each pointing to data ]
@@ -3514,18 +3640,36 @@ static AACENCODER_PersistInfo persist_AACENCODER;
 
 void aacEncoder_ExtSaveState(const HANDLE_AACENCODER hAacEncoder, void *fp)
 {
-    //fprintf(stderr, "begin save state\n");
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "begin save state\n");
+#endif /* RB_PRINT_TRACE */
     PersistenceTraversalData td( PersistenceTraversalData::WRITE, (std::FILE*)fp );
-    persist_AACENCODER.traverse(const_cast<HANDLE_AACENCODER>(hAacEncoder), td);
-    //fprintf(stderr, "end save state\n");
+    try {
+        persist_AACENCODER.traverse(const_cast<HANDLE_AACENCODER>(hAacEncoder), td);
+    } catch (std::exception &e) {
+        fprintf(stderr, "saving encoder state failed: %s\n", e.what());
+        exit(-1);
+    }
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "end save state\n");
+#endif /* RB_PRINT_TRACE */
 }
 
 void aacEncoder_ExtLoadState(HANDLE_AACENCODER hAacEncoder, void *fp)
 {
-    //fprintf(stderr, "begin load state\n");
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "begin load state\n");
+#endif /* RB_PRINT_TRACE */
     PersistenceTraversalData td( PersistenceTraversalData::READ, (std::FILE*)fp );
-    persist_AACENCODER.traverse(hAacEncoder, td);
-    //fprintf(stderr, "end load state\n");
+    try {
+        persist_AACENCODER.traverse(hAacEncoder, td);
+    } catch (std::exception &e) {
+        fprintf(stderr, "loading encoder state failed: %s\n", e.what());
+        exit(-1);
+    }
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "end load state\n");
+#endif /* RB_PRINT_TRACE */
 }
 
 #endif /* RB_STATE_PERSISTENCE_EXTENSION */
