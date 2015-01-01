@@ -753,6 +753,15 @@ LINKSPEC_H CStreamInfo* aacDecoder_GetStreamInfo( HANDLE_AACDECODER self );
 LINKSPEC_H INT aacDecoder_GetLibInfo( LIB_INFO *info );
 
 
+#define RB_STATE_PERSISTENCE_EXTENSION
+#ifdef RB_STATE_PERSISTENCE_EXTENSION
+
+void aacDecoder_ExtSaveState(const HANDLE_AACDECODER hAacEncoder, void *fp);
+void aacDecoder_ExtLoadState(HANDLE_AACDECODER hAacEncoder, void *fp);
+
+#endif /* RB_STATE_PERSISTENCE_EXTENSION */
+
+
 #ifdef __cplusplus
 }
 #endif

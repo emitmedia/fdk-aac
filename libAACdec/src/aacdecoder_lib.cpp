@@ -1140,5 +1140,596 @@ LINKSPEC_CPP INT aacDecoder_GetLibInfo ( LIB_INFO *info )
 }
 
 
+#define RB_STATE_PERSISTENCE_EXTENSION
+#ifdef RB_STATE_PERSISTENCE_EXTENSION
+
+#include <cassert>
+#include <cstdio>
+#include <cstdint>
+#include <map>
+#include <vector>
+
+#include "../../libPCMutils/src/limiter_private.h"
+#include "../../libPCMutils/src/pcmutils_lib_private.h"
+#include "../../libMpegTPDec/src/tpdec_lib_private.h"
+#include "../../libSBRdec/src/sbr_ram.h"
 
 
+namespace {
+
+    //////////////////////////////////////////////////////////////////////////////////////////////
+
+    struct PersistenceTraversalData {
+        enum TraversalType { READ, WRITE };
+
+        TraversalType type;
+        FILE *fp;
+
+        PersistenceTraversalData(TraversalType t, FILE *f)
+            : type(t)
+            , fp(f) {}
+
+        std::map<intptr_t, size_t> traversedRanges_;
+
+        bool enterTraversal(void *ptr, size_t size)
+        {
+            if (!ptr)
+                return false;
+
+            // prevent the same item from being persisted more than once:
+
+            intptr_t iptr = (intptr_t)ptr;
+
+            if (traversedRanges_.empty()) {
+#ifdef RB_PRINT_TRACE
+                //fprintf(stderr, "%p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
+                return true;
+            }
+            else {
+                std::map<intptr_t, size_t>::iterator i = traversedRanges_.upper_bound(iptr); // returns next key strictly after iptr
+                if (i != traversedRanges_.begin())
+                    --i; // should give key at or before iptr
+
+                if ((iptr >= i->first) && (iptr < (i->first + (intptr_t)i->second))) {
+                    // range has already been persisted
+                    return false;
+                }
+                else {
+#ifdef RB_PRINT_TRACE
+                    //fprintf(stderr, "%p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
+                    return true;
+                }
+            }
+        }
+
+        void leaveTraversal(void *ptr, size_t size)
+        {
+            intptr_t iptr = (intptr_t)ptr;
+            traversedRanges_.insert(std::make_pair(iptr, size));
+        }
+};
+
+#define ENTER_TRAVERSAL { if (!td.enterTraversal(ptr, sizeof(*ptr))) return; }
+#define LEAVE_TRAVERSAL { td.leaveTraversal(ptr, sizeof(*ptr)); }
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+void writeStruct(const void* ptr, size_t size, FILE *fp)
+{
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "writeStruct: %p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
+
+    std::fwrite(&size, sizeof(size_t), 1, fp);
+    std::fwrite(ptr, size, 1, fp);
+}
+
+void readStruct(void* ptr, size_t size, FILE *fp)
+{
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "readStruct: %p %d\n", (void*)ptr, size);
+#endif /* RB_PRINT_TRACE */
+
+    size_t persistedStorageSize = 0;
+    std::fread(&persistedStorageSize, sizeof(size_t), 1, fp);
+    if (persistedStorageSize != size)
+        throw std::length_error("ERROR: file storage layout does not match memory format");
+
+    std::fread(ptr, size, 1, fp);
+}
+
+void readOrWriteStruct(void *ptr, size_t size, PersistenceTraversalData& td)
+{
+    switch (td.type) {
+    case PersistenceTraversalData::READ:
+        readStruct(ptr, size, td.fp);
+        break;
+    case PersistenceTraversalData::WRITE:
+        writeStruct(ptr, size, td.fp);
+        break;
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+class SparseStructPersistInfo {
+    struct Range { // half open range [begin, end)
+        Range(size_t b, size_t e)
+            : begin(b)
+            , end(e) {}
+
+        size_t begin;
+        size_t end;    
+    };
+
+    size_t storageSize_;
+    std::vector<Range> ranges_; // sparse list of byte ranges to persist
+
+    void write_(const void *ptr, FILE *fp)
+    {
+#ifdef RB_PRINT_TRACE
+        fprintf(stderr, "SparseStructPersistInfo::write_: %p %d\n", (void*)ptr, storageSize_);
+#endif /* RB_PRINT_TRACE */
+
+        const uint8_t *p = (const uint8_t*)ptr;
+        std::fwrite(&storageSize_, sizeof(size_t), 1, fp);
+
+        size_t n=0;
+        for (std::vector<Range>::iterator i = ranges_.begin(); i != ranges_.end(); ++i) {
+            std::fwrite(&p[i->begin], (i->end - i->begin), 1, fp);
+            n += (i->end - i->begin);
+        }
+        assert( n == storageSize_ );
+    }
+
+    void read_(void *ptr, FILE *fp)
+    {
+#ifdef RB_PRINT_TRACE
+        fprintf(stderr, "SparseStructPersistInfo::read_: %p %d\n", (void*)ptr, storageSize_);
+#endif /* RB_PRINT_TRACE */
+
+        uint8_t *p = (uint8_t*)ptr;
+
+        size_t persistedStorageSize = 0;
+        std::fread(&persistedStorageSize, sizeof(size_t), 1, fp);
+        if (persistedStorageSize != storageSize_)
+            throw std::length_error("ERROR: file storage layout does not match memory format");
+            
+        size_t n=0;
+        for (std::vector<Range>::iterator i = ranges_.begin(); i != ranges_.end(); ++i) {
+            std::fread(&p[i->begin], (i->end - i->begin), 1, fp);
+            n += (i->end - i->begin);
+        }
+        assert( n == storageSize_ );
+    }
+
+public:
+    SparseStructPersistInfo(size_t structSize)
+        : storageSize_( structSize )
+    {
+        ranges_.push_back(Range(0, structSize));
+    }
+
+    void skipField(size_t fieldOffset, size_t fieldSize)
+    {
+        // require that splits are ordered
+        // split final segment at fieldOffset...
+        // keep track of storage size
+
+        if (storageSize_ <= fieldSize)
+        assert( storageSize_ > fieldSize ); // > not >= because we assume that we will always write some data
+        
+        if (fieldOffset < ranges_.back().begin)
+        assert( fieldOffset >= ranges_.back().begin ); // fields must be skipped in order. therefore always fall in the trailing segment
+        
+        if (fieldOffset + fieldSize > ranges_.back().end)
+        assert(fieldOffset + fieldSize <= ranges_.back().end); // field-skip overruns end of struct. impossible. 
+
+        if (fieldOffset == ranges_.back().begin) { // skipping field at the start of final segment
+        
+            ranges_.back().begin += fieldSize;
+            assert( ranges_.back().begin <= ranges_.back().end ); 
+        
+            if (ranges_.back().begin == ranges_.back().end) // skipped final and only field
+                ranges_.pop_back();
+        
+        } else if (fieldOffset + fieldSize == ranges_.back().end) { // skipping field at end of final segment
+
+            ranges_.back().end = fieldOffset;
+
+            assert( ranges_.back().begin != ranges_.back().end ); // we shouldn't be in this if branch if fieldOffset==begin
+        
+        } else { // split final segment 
+            size_t end = ranges_.back().end;
+            ranges_.back().end = fieldOffset;
+            ranges_.push_back(Range(fieldOffset+fieldSize, end));
+        }
+        
+        storageSize_ -= fieldSize;
+    }
+
+protected:
+    void readOrWrite_( void *ptr, PersistenceTraversalData& td )
+    {
+        switch (td.type) {
+        case PersistenceTraversalData::READ:
+            read_(ptr, td.fp);
+            break;
+        case PersistenceTraversalData::WRITE:
+            write_(ptr, td.fp);
+            break;
+        }
+    }
+};
+
+#define SKIP_FIELD( s, t, m ) skipField( offsetof(s,m), sizeof(t) ) // struct, memberType, member
+
+#define SKIP_ARRAY_FIELD( s, t, m, n ) skipField( offsetof(s,m), sizeof(t)*(n) ) // struct, memberType, member, array elem count
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+template <typename T>
+struct ContiguousStructPersistInfo_T { // used for structs with no ptrs, where all data should be persisted
+    // leafs only read or write. never traverse
+    void readOrWrite(T *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWriteStruct(ptr, sizeof(T), td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+
+
+#define TODO ;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// TRANSPORTDEC [ has sub-structs]
+
+struct TRANSPORTDEC_PersistInfo : SparseStructPersistInfo {
+    TRANSPORTDEC_PersistInfo()
+        : SparseStructPersistInfo(sizeof(TRANSPORTDEC))
+    {
+        TODO
+        // SKIP_FIELD(AAC_DECODER_INSTANCE, X, Y);
+    }
+
+    void traverse(TRANSPORTDEC *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // TRANSPORTDEC:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static TRANSPORTDEC_PersistInfo persist_TRANSPORTDEC;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// SamplingRateInfo [has pointers]
+
+struct SamplingRateInfo_PersistInfo : SparseStructPersistInfo {
+    SamplingRateInfo_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SamplingRateInfo))
+    {
+        TODO
+        // SKIP_FIELD(SamplingRateInfo, X, Y);
+    }
+
+    void traverse(SamplingRateInfo *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SamplingRateInfo:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SamplingRateInfo_PersistInfo persist_SamplingRateInfo;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// CStreamInfo [has pointers]
+
+struct CStreamInfo_PersistInfo : SparseStructPersistInfo {
+    CStreamInfo_PersistInfo()
+        : SparseStructPersistInfo(sizeof(CStreamInfo))
+    {
+        TODO
+        // SKIP_FIELD(CStreamInfo, X, Y);
+    }
+
+    void traverse(CStreamInfo *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // CStreamInfo:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static CStreamInfo_PersistInfo persist_CStreamInfo;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// CAacDecoderChannelInfo [has pointers]
+
+struct CAacDecoderChannelInfo_PersistInfo : SparseStructPersistInfo {
+    CAacDecoderChannelInfo_PersistInfo()
+        : SparseStructPersistInfo(sizeof(CAacDecoderChannelInfo))
+    {
+        TODO
+        // SKIP_FIELD(CAacDecoderChannelInfo, X, Y);
+    }
+
+    void traverse(CAacDecoderChannelInfo *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // CAacDecoderChannelInfo:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static CAacDecoderChannelInfo_PersistInfo persist_CAacDecoderChannelInfo;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// CAacDecoderStaticChannelInfo [has pointers]
+
+struct CAacDecoderStaticChannelInfo_PersistInfo : SparseStructPersistInfo {
+    CAacDecoderStaticChannelInfo_PersistInfo()
+        : SparseStructPersistInfo(sizeof(CAacDecoderStaticChannelInfo))
+    {
+        TODO
+        // SKIP_FIELD(CAacDecoderStaticChannelInfo, X, Y);
+    }
+
+    void traverse(CAacDecoderStaticChannelInfo *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // CAacDecoderStaticChannelInfo:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static CAacDecoderStaticChannelInfo_PersistInfo persist_CAacDecoderStaticChannelInfo;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// CAacDecoderCommonData [has pointers, possibly skip work buffer and overlay]
+
+struct CAacDecoderCommonData_PersistInfo : SparseStructPersistInfo {
+    CAacDecoderCommonData_PersistInfo()
+        : SparseStructPersistInfo(sizeof(CAacDecoderCommonData))
+    {
+        TODO
+        // SKIP_FIELD(CAacDecoderCommonData, X, Y);
+    }
+
+    void traverse(CAacDecoderCommonData *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // CAacDecoderCommonData:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static CAacDecoderCommonData_PersistInfo persist_CAacDecoderCommonData;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// SBR_DECODER_INSTANCE [ has pointers ]
+
+struct SBR_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
+    SBR_DECODER_INSTANCE_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_DECODER_INSTANCE))
+    {
+        TODO
+        // SKIP_FIELD(SBR_DECODER_INSTANCE, X, Y);
+    }
+
+    void traverse(SBR_DECODER_INSTANCE *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_DECODER_INSTANCE:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_DECODER_INSTANCE_PersistInfo persist_SBR_DECODER_INSTANCE;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// CAncData [contains pointer buffer]
+
+struct CAncData_PersistInfo : SparseStructPersistInfo {
+    CAncData_PersistInfo()
+        : SparseStructPersistInfo(sizeof(CAncData))
+    {
+        TODO
+        // SKIP_FIELD(CAncData, X, Y);
+    }
+
+    void traverse(CAncData *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // CAncData:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static CAncData_PersistInfo persist_CAncData;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+// TDLimiter [contains pointers]
+
+struct TDLimiter_PersistInfo : SparseStructPersistInfo {
+    TDLimiter_PersistInfo()
+        : SparseStructPersistInfo(sizeof(TDLimiter))
+    {
+        TODO
+        // SKIP_FIELD(TDLimiter, X, Y);
+    }
+
+    void traverse(TDLimiter *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // TDLimiter:
+        TODO
+
+        LEAVE_TRAVERSAL
+    }
+};
+static TDLimiter_PersistInfo persist_TDLimiter;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+static ContiguousStructPersistInfo_T<CDrcInfo> persist_CDrcInfo;
+static ContiguousStructPersistInfo_T<PCM_DMX_INSTANCE> persist_PCM_DMX_INSTANCE;
+
+struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
+    AAC_DECODER_INSTANCE_PersistInfo()
+        : SparseStructPersistInfo(sizeof(AAC_DECODER_INSTANCE))
+    {
+        SKIP_FIELD(AAC_DECODER_INSTANCE, HANDLE_TRANSPORTDEC, hInput);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, SamplingRateInfo, samplingRateInfo);
+        SKIP_ARRAY_FIELD(AAC_DECODER_INSTANCE, UCHAR*, channelOutputMapping, 8);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, CStreamInfo, streamInfo);
+        SKIP_ARRAY_FIELD(AAC_DECODER_INSTANCE, CAacDecoderChannelInfo*, pAacDecoderChannelInfo, 8);
+        SKIP_ARRAY_FIELD(AAC_DECODER_INSTANCE, CAacDecoderStaticChannelInfo*, pAacDecoderStaticChannelInfo, 8);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, CAacDecoderCommonData, aacCommonData);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, HANDLE_SBRDECODER, hSbrDecoder);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, HANDLE_AAC_DRC, hDrcInfo);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, CAncData, ancData);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, HANDLE_PCM_DOWNMIX, hPcmUtils);
+        SKIP_FIELD(AAC_DECODER_INSTANCE, TDLimiterPtr, hLimiter);
+    }
+    
+    void traverse(AAC_DECODER_INSTANCE *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // AAC_DECODER_INSTANCE:
+        // AAC_DECODER_INSTANCE::HANDLE_TRANSPORTDEC -> TRANSPORTDEC
+        persist_TRANSPORTDEC.traverse(ptr->hInput, td);
+
+        // AAC_DECODER_INSTANCE::SamplingRateInfo [has pointers]
+        persist_SamplingRateInfo.traverse(&ptr->samplingRateInfo, td);
+
+        // FIXME REVIEW const UCHAR         (*channelOutputMapping)[8]; ???? skip?
+
+        // AAC_DECODER_INSTANCE::CProgramConfig [flat]
+
+        // AAC_DECODER_INSTANCE::CStreamInfo [has pointers]
+        persist_CStreamInfo.traverse(&ptr->streamInfo, td);
+
+        // AAC_DECODER_INSTANCE::CAacDecoderChannelInfo [array of pointers to struct with pointers]
+        for (int i = 0; i < 8; ++i) {
+            persist_CAacDecoderChannelInfo.traverse(ptr->pAacDecoderChannelInfo[i], td);
+        }
+        
+        // AAC_DECODER_INSTANCE::CAacDecoderStaticChannelInfo [array of pointers to struct with pointers]
+        for (int i = 0; i < 8; ++i) {
+            persist_CAacDecoderStaticChannelInfo.traverse(ptr->pAacDecoderStaticChannelInfo[i], td);
+        }
+        
+        // AAC_DECODER_INSTANCE::CAacDecoderCommonData [contains pointers, possibly skip work buffer and overlay]
+        persist_CAacDecoderCommonData.traverse(&ptr->aacCommonData, td);
+
+        // AAC_DECODER_INSTANCE::CConcealParams [flat]
+
+        // AAC_DECODER_INSTANCE::HANDLE_SBRDECODER -> SBR_DECODER_INSTANCE
+        persist_SBR_DECODER_INSTANCE.traverse(ptr->hSbrDecoder, td);
+
+        // AAC_DECODER_INSTANCE::SBR_PARAMS [flat]
+        // QMF_MODE [enum]
+
+        // HANDLE_AAC_DRC -> CDrcInfo [CDrcInfo is flat]
+        persist_CDrcInfo.readOrWrite(ptr->hDrcInfo, td);
+
+        // AAC_DECODER_INSTANCE::CAncData [contains pointer buffer]
+        persist_CAncData.traverse(&ptr->ancData, td);
+
+        // AAC_DECODER_INSTANCE::HANDLE_PCM_DOWNMIX -> PCM_DMX_INSTANCE [flat struct?]
+        persist_PCM_DMX_INSTANCE.readOrWrite(ptr->hPcmUtils, td);
+
+        // TDLimiterPtr -> TDLimiter [contains pointers]
+        persist_TDLimiter.traverse(ptr->hLimiter, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static AAC_DECODER_INSTANCE_PersistInfo persist_AAC_DECODER_INSTANCE;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+} // end anonymous namespace
+
+void aacDecoder_ExtSaveState(const HANDLE_AACDECODER hAacDecoder, void *fp)
+{
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "begin save state\n");
+#endif /* RB_PRINT_TRACE */
+    PersistenceTraversalData td(PersistenceTraversalData::WRITE, (std::FILE*)fp);
+    try {
+        persist_AAC_DECODER_INSTANCE.traverse(const_cast<HANDLE_AACDECODER>(hAacDecoder), td);
+    }
+    catch (std::exception &e) {
+        fprintf(stderr, "saving decoder state failed: %s\n", e.what());
+        exit(-1);
+    }
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "end save state\n");
+#endif /* RB_PRINT_TRACE */
+}
+
+void aacDecoder_ExtLoadState(HANDLE_AACDECODER hAacDecoder, void *fp)
+{
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "begin load state\n");
+#endif /* RB_PRINT_TRACE */
+    PersistenceTraversalData td(PersistenceTraversalData::READ, (std::FILE*)fp);
+    try {
+        persist_AAC_DECODER_INSTANCE.traverse(hAacDecoder, td);
+    }
+    catch (std::exception &e) {
+        fprintf(stderr, "loading decoder state failed: %s\n", e.what());
+        exit(-1);
+    }
+#ifdef RB_PRINT_TRACE
+    fprintf(stderr, "end load state\n");
+#endif /* RB_PRINT_TRACE */
+}
+
+#endif /* RB_STATE_PERSISTENCE_EXTENSION */
