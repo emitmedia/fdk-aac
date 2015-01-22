@@ -2224,10 +2224,6 @@ void readStruct(void* ptr, size_t size, FILE *fp)
 
 void readOrWriteStruct(void *ptr, size_t size, PersistenceTraversalData& td)
 {
-    if (size > 1000) {
-        fprintf(stderr, "readOrWriteStruct: %p %d\n", (void*)ptr, size);
-    }
-
     switch (td.type) {
     case PersistenceTraversalData::READ:
         readStruct(ptr, size, td.fp);
@@ -2399,7 +2395,7 @@ struct ADJ_THR_STATE_PersistInfo : SparseStructPersistInfo {
         SKIP_ARRAY_FIELD(ADJ_THR_STATE, ATS_ELEMENT*, adjThrStateElem, 8);
     }
 
-    void traverse(ADJ_THR_STATE *ptr, PersistenceTraversalData& td)
+    void traverse(ADJ_THR_STATE *ptr, PersistenceTraversalData& td, INT maxElements)
     {
         ENTER_TRAVERSAL
 
@@ -2409,7 +2405,7 @@ struct ADJ_THR_STATE_PersistInfo : SparseStructPersistInfo {
         // ADJ_THR_STATE::BRES_PARAM [no handles]
 
         // ADJ_THR_STATE::ATS_ELEMENT [array of 8 pointers to ATS_ELEMENT]
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < maxElements; ++i)
             persist_ATS_ELEMENT.readOrWrite(ptr->adjThrStateElem[i], td);
 
         LEAVE_TRAVERSAL
@@ -2442,7 +2438,7 @@ struct QC_STATE_PersistInfo : SparseStructPersistInfo {
         persist_BITCNTR_STATE.readOrWrite(ptr->hBitCounter, td);
 
         // QC_STATE::ADJ_THR_STATE ptr
-        persist_ADJ_THR_STATE.traverse(ptr->hAdjThr, td);
+        persist_ADJ_THR_STATE.traverse(ptr->hAdjThr, td, aacEnc->maxElements);
 
         LEAVE_TRAVERSAL
     }
@@ -3449,19 +3445,19 @@ struct SBR_ENCODER_PersistInfo : SparseStructPersistInfo {
         SKIP_FIELD(SBR_ENCODER, QMF_FILTER_BANK, qmfSynthesisPS);
     }
 
-    void traverse(SBR_ENCODER *ptr, PersistenceTraversalData& td)
+    void traverse(SBR_ENCODER *ptr, PersistenceTraversalData& td, const AACENCODER *aacEncoder)
     {
         ENTER_TRAVERSAL
 
         readOrWrite_(ptr, td);
-
+        
         // SBR_ENCODER:
         // SBR_ENCODER::HANDLE_SBR_ELEMENT [array of 8 handles]
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < aacEncoder->nMaxSbrElements; ++i)
             persist_SBR_ELEMENT.traverse(ptr->sbrElement[i], td);
         
         // SBR_ENCODER::HANDLE_SBR_CHANNEL [array of 8 handles]
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < aacEncoder->nMaxSbrChannels; ++i)
             persist_SBR_CHANNEL.traverse(ptr->pSbrChannel[i], td);
 
         // SBR_ENCODER::QMF_FILTER_BANK [array of 8 QMF_FILTER_BANK]
@@ -3620,7 +3616,7 @@ struct AACENCODER_PersistInfo : SparseStructPersistInfo {
         persist_AAC_ENC.traverse(ptr->hAacEnc, td);
 
         // AACENCODER::HANDLE_SBR_ENCODER [ pointer to SBR_ENCODER struct]
-        persist_SBR_ENCODER.traverse(ptr->hEnvEnc, td);
+        persist_SBR_ENCODER.traverse(ptr->hEnvEnc, td, ptr);
         
         // AACENCODER::HANDLE_FDK_METADATA_ENCODER [ pointer to FDK_METADATA_ENCODER struct ]
         persist_FDK_METADATA_ENCODER.traverse(ptr->hMetadataEnc, td);
