@@ -2174,6 +2174,8 @@ struct PersistenceTraversalData {
 
             if ((iptr >= i->first) && (iptr < (i->first + (intptr_t)i->second))) {
                 // range has already been persisted
+
+                //fprintf(stderr, "x %p %d\n", (void*)ptr, size);
                 return false;
             } else {
 #ifdef RB_PRINT_TRACE
@@ -2222,6 +2224,10 @@ void readStruct(void* ptr, size_t size, FILE *fp)
 
 void readOrWriteStruct(void *ptr, size_t size, PersistenceTraversalData& td)
 {
+    if (size > 1000) {
+        fprintf(stderr, "readOrWriteStruct: %p %d\n", (void*)ptr, size);
+    }
+
     switch (td.type) {
     case PersistenceTraversalData::READ:
         readStruct(ptr, size, td.fp);
@@ -2421,7 +2427,7 @@ struct QC_STATE_PersistInfo : SparseStructPersistInfo {
         SKIP_FIELD(QC_STATE, ADJ_THR_STATE*, hAdjThr);
     }
 
-    void traverse(QC_STATE *ptr, PersistenceTraversalData& td)
+    void traverse(QC_STATE *ptr, PersistenceTraversalData& td, const AAC_ENC *aacEnc)
     {
         ENTER_TRAVERSAL
 
@@ -2429,7 +2435,7 @@ struct QC_STATE_PersistInfo : SparseStructPersistInfo {
 
         // QC_STATE:
         // QC_STATE::ELEMENT_BITS [array of 8 ELEMENT_BITS pointers]
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < aacEnc->maxElements; ++i)
             persist_ELEMENT_BITS.readOrWrite(ptr->elementBits[i], td);
 
         // QC_STATE::BITCNTR_STATE ptr
@@ -2487,7 +2493,7 @@ struct QC_OUT_ELEMENT_PersistInfo : SparseStructPersistInfo {
 
         // QC_OUT_ELEMENT: 
         // QC_OUT_ELEMENT::QC_OUT_EXTENSION
-        persist_QC_OUT_EXTENSION.traverse(&ptr->extension[1], td);
+        persist_QC_OUT_EXTENSION.traverse(&ptr->extension[0], td);
 
         // QC_OUT_ELEMENT::PE_DATA [contiguous data]
 
@@ -2511,7 +2517,7 @@ struct QC_OUT_PersistInfo : SparseStructPersistInfo {
         SKIP_ARRAY_FIELD(QC_OUT, QC_OUT_EXTENSION, extension, (2+2));
     }
 
-    void traverse(QC_OUT *ptr, PersistenceTraversalData& td)
+    void traverse(QC_OUT *ptr, PersistenceTraversalData& td, const AAC_ENC *aacEnc)
     {
         ENTER_TRAVERSAL
 
@@ -2519,7 +2525,7 @@ struct QC_OUT_PersistInfo : SparseStructPersistInfo {
 
         // QC_OUT:
         // QC_OUT::QC_OUT_ELEMENT [array of 8 QC_OUT_ELEMENT ptrs]
-        for (int i=0; i < 8; ++i)
+        for (int i=0; i < aacEnc->maxElements; ++i)
             persist_QC_OUT_ELEMENT.traverse(ptr->qcElement[i], td);
 
         // QC_OUT::QC_OUT_CHANNEL  [array of 8 QC_OUT_CHANNEL ptrs]
@@ -2528,7 +2534,7 @@ struct QC_OUT_PersistInfo : SparseStructPersistInfo {
         //    persist_QC_OUT_CHANNEL.readOrWrite(ptr->pQcOutChannels[i], td);
         
         // QC_OUT::QC_OUT_EXTENSION [array of 4 QC_OUT_EXTENSION ptrs]
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < (2+2); ++i)
             persist_QC_OUT_EXTENSION.traverse(&ptr->extension[i], td);
 
         LEAVE_TRAVERSAL
@@ -2596,17 +2602,17 @@ static PSY_OUT_ELEMENT_PersistInfo persist_PSY_OUT_ELEMENT;
 
 
 struct PSY_OUT_PersistInfo {
-    void traverse(PSY_OUT *ptr, PersistenceTraversalData& td)
+    void traverse(PSY_OUT *ptr, PersistenceTraversalData& td, const AAC_ENC *aacEnc)
     {
         ENTER_TRAVERSAL
 
         // PSY_OUT:
         // PSY_OUT::PSY_OUT_ELEMENT ptr[8]
-        for (int i=0; i < 8; ++i)
+        for (int i=0; i < aacEnc->maxElements; ++i)
             persist_PSY_OUT_ELEMENT.traverse(ptr->psyOutElement[i], td);
 
         // PSY_OUT::PSY_OUT_CHANNEL ptr[8] 
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < aacEnc->maxChannels; ++i)
             persist_PSY_OUT_CHANNEL.traverse(ptr->pPsyOutChannels[i], td);
 
         LEAVE_TRAVERSAL
@@ -2633,7 +2639,7 @@ struct PSY_STATIC_PersistInfo : SparseStructPersistInfo {
         // PSY_STATIC:
         // PSY_STATIC::INT_PCM ptr psyInputBuffer
 
-        // REVIEW: psyInputBuffer is used as a (ring buffer?) input to psych. maybe don't need to save all of it, but for now...
+        // REVIEW: psyInputBuffer (4096 bytes) is used as a input to psych.
         readOrWriteStruct(ptr->psyInputBuffer, MAX_INPUT_BUFFER_SIZE*sizeof(INT_PCM), td);
 
         // PSY_STATIC::BLOCK_SWITCHING_CONTROL [flat struct]
@@ -2669,7 +2675,7 @@ struct PSY_INTERNAL_PersistInfo : SparseStructPersistInfo {
         SKIP_FIELD(PSY_INTERNAL, PSY_DYNAMIC*, psyDynamic);
     }
 
-    void traverse(PSY_INTERNAL *ptr, PersistenceTraversalData& td)
+    void traverse(PSY_INTERNAL *ptr, PersistenceTraversalData& td, const AAC_ENC *aacEnc)
     {
         ENTER_TRAVERSAL
 
@@ -2679,11 +2685,11 @@ struct PSY_INTERNAL_PersistInfo : SparseStructPersistInfo {
         // PSY_INTERNAL::PSY_CONFIGURATION [flat nested structs no pointers]
 
         // PSY_INTERNAL::PSY_ELEMENT [array pf 8 pointers]
-        for (int i=0; i < 8; ++i)
+        for (int i=0; i < aacEnc->maxElements; ++i)
             persist_PSY_ELEMENT.traverse(ptr->psyElement[i], td);
 
         // PSY_INTERNAL::PSY_STATIC [array pf 8 pointers]
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < aacEnc->maxChannels; ++i)
             persist_PSY_STATIC.traverse(ptr->pStaticChannels[i], td);
 
         // PSY_INTERNAL::PSY_DYNAMIC ptr
@@ -2723,16 +2729,16 @@ struct AAC_ENC_PersistInfo : SparseStructPersistInfo {
         // AAC_ENC::CHANNEL_MAPPING [contiguous storage with nested arrays, no ptrs]
 
         // AAC_ENC::QC_STATE [pointer]
-        persist_QC_STATE.traverse(ptr->qcKernel, td);
+        persist_QC_STATE.traverse(ptr->qcKernel, td, ptr);
 
         // AAC_ENC::QC_OUT [pointer]
-        persist_QC_OUT.traverse(ptr->qcOut[0], td);
+        persist_QC_OUT.traverse(ptr->qcOut[0], td, ptr);
 
         // AAC_ENC::PSY_OUT [pointer]
-        persist_PSY_OUT.traverse(ptr->psyOut[0], td);
+        persist_PSY_OUT.traverse(ptr->psyOut[0], td, ptr);
 
         // AAC_ENC::PSY_INTERNAL [pointer]
-        persist_PSY_INTERNAL.traverse(ptr->psyKernel, td);
+        persist_PSY_INTERNAL.traverse(ptr->psyKernel, td, ptr);
 
         // dynamic_RAM is used to allocate temporary sub-structures that are only used within a single processing phase.
         // AAC_ENC::FIXP_DBL  *dynamic_RAM
@@ -3465,7 +3471,7 @@ struct SBR_ENCODER_PersistInfo : SparseStructPersistInfo {
         // SBR_ENCODER::DOWNSAMPLER
         persist_DOWNSAMPLER.traverse(&ptr->lfeDownSampler, td);
 
-        // REVIEW: "dynamic RAM" is typically used to allocate additional storage
+        // "dynamic RAM" is used to allocate temporary storage within a single processing phase
         // SBR_ENCODER::UCHAR* dynamicRam;
         // SBR_ENCODER::UCHAR* pSBRdynamic_RAM;
 
@@ -3623,7 +3629,8 @@ struct AACENCODER_PersistInfo : SparseStructPersistInfo {
         persist_TRANSPORTENC.traverse(ptr->hTpEnc, td);
         
         // AACENCODER:: UCHAR *outBuffer
-        // REVIEW: outBuffer is used to init transport encoder and then bitstream. Buffer does not appear to be needed.
+        // REVIEW: outBuffer is used to init transport encoder and then bitstream. 
+        // Testing suggests that buffer is not needed.
         //readOrWriteStruct(ptr->outBuffer, ptr->outBufferInBytes, td);
 
         // AACENCODER:: UCHAR *inputBuffer
