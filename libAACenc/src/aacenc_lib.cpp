@@ -2371,12 +2371,13 @@ static ContiguousStructPersistInfo_T<ELEMENT_BITS> persist_ELEMENT_BITS;
 struct BITCNTR_STATE_PersistInfo {
     void readOrWrite(BITCNTR_STATE *ptr, PersistenceTraversalData& td)
     {
-        // REVIEW: comment for GetRam_aacEnc_BitLookUp and GetRam_aacEnc_MergeGainLookUp says "values are temporary so dynamic RAM can be used"
-        // therefore we assume that we don't need to persist this data.
+        // BitLookUp and MergeGainLookUp are temporary.
+        // cf. comment for GetRam_aacEnc_BitLookUp and GetRam_aacEnc_MergeGainLookUp says "values are temporary so dynamic RAM can be used"
+        // cf. dynamic ram layout for AAC_ENC, aacEnc_ram.h:163
 
         // BITCNTR_STATE:     
-        // INT *bitLookUp ?  pointer into some other existing thing?
-        // INT *mergeGainLookUp ?
+        // INT *bitLookUp
+        // INT *mergeGainLookUp
     }
 };
 
@@ -2491,8 +2492,9 @@ struct QC_OUT_ELEMENT_PersistInfo : SparseStructPersistInfo {
         // QC_OUT_ELEMENT::PE_DATA [contiguous data]
 
         // QC_OUT_ELEMENT::QC_OUT_CHANNEL  [array of 2 QC_OUT_CHANNEL ptrs]
-        for (int i = 0; i < 2; ++i)
-            persist_QC_OUT_CHANNEL.readOrWrite(ptr->qcOutChannel[i], td);
+        // qcOutChannel is initialized from qcOutChannels[] which is dynamic (see below).
+        //for (int i = 0; i < 2; ++i)
+        //    persist_QC_OUT_CHANNEL.readOrWrite(ptr->qcOutChannel[i], td);
 
         LEAVE_TRAVERSAL
     }
@@ -2521,8 +2523,9 @@ struct QC_OUT_PersistInfo : SparseStructPersistInfo {
             persist_QC_OUT_ELEMENT.traverse(ptr->qcElement[i], td);
 
         // QC_OUT::QC_OUT_CHANNEL  [array of 8 QC_OUT_CHANNEL ptrs]
-        for (int i = 0; i < 8; ++i)
-            persist_QC_OUT_CHANNEL.readOrWrite(ptr->pQcOutChannels[i], td);
+        // pQcOutChannels is initialized from dynamic ram. cf. GetRam_aacEnc_QCchannel(), aacEnc_ram.h:163:
+        //for (int i = 0; i < 8; ++i)
+        //    persist_QC_OUT_CHANNEL.readOrWrite(ptr->pQcOutChannels[i], td);
         
         // QC_OUT::QC_OUT_EXTENSION [array of 4 QC_OUT_EXTENSION ptrs]
         for (int i = 0; i < 8; ++i)
@@ -2657,13 +2660,6 @@ struct PSY_ELEMENT_PersistInfo {
 static PSY_ELEMENT_PersistInfo persist_PSY_ELEMENT;
 
 
-// PSY_DYNAMIC:
-// PSY_DYNAMIC::PSY_DATA [flat data]
-// PSY_DYNAMIC::TNS_DATA [flat data]
-// PSY_DYNAMIC::PNS_DATA [flat data]
-static ContiguousStructPersistInfo_T<PSY_DYNAMIC> persist_PSY_DYNAMIC;
-
-
 struct PSY_INTERNAL_PersistInfo : SparseStructPersistInfo {
     PSY_INTERNAL_PersistInfo()
         : SparseStructPersistInfo(sizeof(PSY_INTERNAL))
@@ -2691,7 +2687,7 @@ struct PSY_INTERNAL_PersistInfo : SparseStructPersistInfo {
             persist_PSY_STATIC.traverse(ptr->pStaticChannels[i], td);
 
         // PSY_INTERNAL::PSY_DYNAMIC ptr
-        persist_PSY_DYNAMIC.readOrWrite(ptr->psyDynamic, td);
+        // PSY_DYNAMIC is a temporary data structure cf. dynamic ram layout for AAC_ENC, aacEnc_ram.h:163
 
         LEAVE_TRAVERSAL
     }
@@ -2738,7 +2734,7 @@ struct AAC_ENC_PersistInfo : SparseStructPersistInfo {
         // AAC_ENC::PSY_INTERNAL [pointer]
         persist_PSY_INTERNAL.traverse(ptr->psyKernel, td);
 
-        // REVIEW: dynamic dynamic_RAM is typically used to allocate sub-structures. we persist the structures, so don't need to save the RAM.
+        // dynamic_RAM is used to allocate temporary sub-structures that are only used within a single processing phase.
         // AAC_ENC::FIXP_DBL  *dynamic_RAM
 
         LEAVE_TRAVERSAL
@@ -2760,13 +2756,17 @@ struct FDK_BITBUF_PersistInfo : SparseStructPersistInfo {
     {
         ENTER_TRAVERSAL
 
+        // assert(ptr->ValidBits == 0);
+        // REVIEW FIXME: the above assert fails and the bitstream indicates that it has valid bits at the end of the encode
+
         readOrWrite_(ptr, td);
         
-        // The following FDK_BITBUF fields are initialized from another buffer. We don't save them here.
+        // The following FDK_BITBUF fields are initialized from tpEnc bsBuffer, which is inited from AACENCODER outBuffer
+        // at present we don't save any of this.
         /*
         UCHAR *Buffer;
         UINT   bufSize;
-        UINT   bufBits;
+        UINT   bufBits; // total number of bits stored in the buffer (bufSize*8)
         */
 
         LEAVE_TRAVERSAL
@@ -2890,13 +2890,13 @@ struct SBR_EXTRACT_ENVELOPE_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
 
-        // should we persist these? REVIEW: i think they are temp buffers.
+        // Temp buffers. allocated via dynamic ram functions:
+        // GetRam_Sbr_envYBuffer, GetRam_Sbr_envRBuffer, GetRam_Sbr_envIBuffer
         /*
         FIXP_DBL  *rBuffer[QMF_MAX_TIME_SLOTS];
         FIXP_DBL  *iBuffer[QMF_MAX_TIME_SLOTS];
 
-        FIXP_DBL  *p_YBuffer;
-
+        FIXP_DBL  *p_YBuffer; 
         FIXP_DBL  *YBuffer[QMF_MAX_TIME_SLOTS];
         */
 
@@ -3412,7 +3412,7 @@ struct PARAMETRIC_STEREO_PersistInfo : SparseStructPersistInfo {
 
         // PARAMETRIC_STEREO::FIXP_DBL *pHybridData
         // pHybridData is configured to point to some __staticHybridData (already persisted)
-        // and some dynamic_RAM (presumably not needed between passes)
+        // and some dynamic_RAM allocated via dynamic ram functions GetRam_Sbr_envRBuffer, GetRam_Sbr_envIBuffer
 
         // PARAMETRIC_STEREO::FDK_ANA_HYB_FILTER [array of MAX_PS_CHANNELS analysis filters]
         for (int i=0; i < MAX_PS_CHANNELS; ++i) {
@@ -3568,7 +3568,11 @@ struct TRANSPORTENC_PersistInfo : SparseStructPersistInfo {
         persist_FDK_BITSTREAM.traverse(&ptr->bitStream, td);
 
         // storage for ptr->bitStream
-        readOrWriteStruct(ptr->bsBuffer, ptr->bsBufferSize, td);
+
+        // REVIEW:
+        // bsBuffer is initialized from AACENCODER::outBuffer.
+        // it is used to initialize hTpEnc->bitStream
+        // readOrWriteStruct(ptr->bsBuffer, ptr->bsBufferSize, td);
     
         // ::writer [union of flat structs]
 
@@ -3619,7 +3623,8 @@ struct AACENCODER_PersistInfo : SparseStructPersistInfo {
         persist_TRANSPORTENC.traverse(ptr->hTpEnc, td);
         
         // AACENCODER:: UCHAR *outBuffer
-        readOrWriteStruct(ptr->outBuffer, ptr->outBufferInBytes, td);
+        // REVIEW: outBuffer is used to init transport encoder and then bitstream. Buffer does not appear to be needed.
+        //readOrWriteStruct(ptr->outBuffer, ptr->outBufferInBytes, td);
 
         // AACENCODER:: UCHAR *inputBuffer
         readOrWriteStruct(ptr->inputBuffer, sizeof(INT_PCM)*ptr->nMaxAacChannels*INPUTBUFFER_SIZE, td);
