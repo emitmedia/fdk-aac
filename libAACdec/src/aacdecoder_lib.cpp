@@ -1147,6 +1147,7 @@ LINKSPEC_CPP INT aacDecoder_GetLibInfo ( LIB_INFO *info )
 #include <cstdio>
 #include <cstdint>
 #include <map>
+#include <typeinfo>
 #include <vector>
 
 #include "../../libPCMutils/src/limiter_private.h"
@@ -1154,6 +1155,7 @@ LINKSPEC_CPP INT aacDecoder_GetLibInfo ( LIB_INFO *info )
 #include "../../libMpegTPDec/src/tpdec_lib_private.h"
 #include "../../libSBRdec/src/sbr_ram.h"
 
+//#define RB_PRINT_TRACE
 
 namespace {
 
@@ -1165,16 +1167,24 @@ namespace {
         TraversalType type;
         FILE *fp;
 
+#ifdef RB_PRINT_TRACE
+        std::vector<const char *> traversalStack_;
+#endif /* RB_PRINT_TRACE */
+
         PersistenceTraversalData(TraversalType t, FILE *f)
             : type(t)
             , fp(f) {}
 
         std::map<intptr_t, size_t> traversedRanges_;
 
-        bool enterTraversal(void *ptr, size_t size)
+        bool enterTraversal(void *ptr, size_t size, const char *className)
         {
             if (!ptr)
                 return false;
+
+#ifdef RB_PRINT_TRACE
+            traversalStack_.push_back(className);
+#endif /* RB_PRINT_TRACE */
 
             // prevent the same item from being persisted more than once:
 
@@ -1208,10 +1218,14 @@ namespace {
         {
             intptr_t iptr = (intptr_t)ptr;
             traversedRanges_.insert(std::make_pair(iptr, size));
+
+#ifdef RB_PRINT_TRACE
+            traversalStack_.pop_back();
+#endif /* RB_PRINT_TRACE */
         }
 };
 
-#define ENTER_TRAVERSAL { if (!td.enterTraversal(ptr, sizeof(*ptr))) return; }
+#define ENTER_TRAVERSAL { if (!td.enterTraversal(ptr, sizeof(*ptr), typeid(*this).name())) return; }
 #define LEAVE_TRAVERSAL { td.leaveTraversal(ptr, sizeof(*ptr)); }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -1267,10 +1281,10 @@ class SparseStructPersistInfo {
     size_t storageSize_;
     std::vector<Range> ranges_; // sparse list of byte ranges to persist
 
-    void write_(const void *ptr, FILE *fp)
+    void write_(const void *ptr, FILE *fp, const PersistenceTraversalData& td)
     {
 #ifdef RB_PRINT_TRACE
-        fprintf(stderr, "SparseStructPersistInfo::write_: %p %d\n", (void*)ptr, storageSize_);
+        fprintf(stderr, "SparseStructPersistInfo::write_: [%s] %p %d\n", td.traversalStack_.back(), (void*)ptr, storageSize_);
 #endif /* RB_PRINT_TRACE */
 
         const uint8_t *p = (const uint8_t*)ptr;
@@ -1284,10 +1298,10 @@ class SparseStructPersistInfo {
         assert( n == storageSize_ );
     }
 
-    void read_(void *ptr, FILE *fp)
+    void read_(void *ptr, FILE *fp, const PersistenceTraversalData& td)
     {
 #ifdef RB_PRINT_TRACE
-        fprintf(stderr, "SparseStructPersistInfo::read_: %p %d\n", (void*)ptr, storageSize_);
+        fprintf(stderr, "SparseStructPersistInfo::read_: [%s] %p %d\n", td.traversalStack_.back(), (void*)ptr, storageSize_);
 #endif /* RB_PRINT_TRACE */
 
         uint8_t *p = (uint8_t*)ptr;
@@ -1355,10 +1369,10 @@ protected:
     {
         switch (td.type) {
         case PersistenceTraversalData::READ:
-            read_(ptr, td.fp);
+            read_(ptr, td.fp, td);
             break;
         case PersistenceTraversalData::WRITE:
-            write_(ptr, td.fp);
+            write_(ptr, td.fp, td);
             break;
         }
     }
@@ -1383,8 +1397,58 @@ struct ContiguousStructPersistInfo_T { // used for structs with no ptrs, where a
     }
 };
 
+//////////////////////////////////////////////////////////////////////////////////////////////
+struct FDK_BITBUF_PersistInfo : SparseStructPersistInfo {
+    FDK_BITBUF_PersistInfo()
+        : SparseStructPersistInfo(sizeof(FDK_BITBUF))
+    {
+        SKIP_FIELD(FDK_BITBUF, UCHAR*, Buffer);
+        SKIP_FIELD(FDK_BITBUF, UINT, bufSize);
+        SKIP_FIELD(FDK_BITBUF, UINT, bufBits);
+    }
 
-#define TODO ;
+    void traverse(FDK_BITBUF *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        // assert(ptr->ValidBits == 0);
+        // REVIEW FIXME: the above assert fails and the bitstream indicates that it has valid bits at the end of the encode
+
+        readOrWrite_(ptr, td);
+        
+        // The following FDK_BITBUF fields are initialized from tpEnc bsBuffer, which is inited from AACENCODER outBuffer
+        // at present we don't save any of this.
+        /*
+        UCHAR *Buffer;
+        UINT   bufSize;
+        UINT   bufBits; // total number of bits stored in the buffer (bufSize*8)
+        */
+
+        LEAVE_TRAVERSAL
+    }
+};
+static FDK_BITBUF_PersistInfo persist_FDK_BITBUF;
+
+
+struct FDK_BITSTREAM_PersistInfo : SparseStructPersistInfo {
+    FDK_BITSTREAM_PersistInfo()
+        : SparseStructPersistInfo(sizeof(FDK_BITSTREAM))
+    {
+        SKIP_FIELD(FDK_BITSTREAM, FDK_BITBUF, hBitBuf);
+    }
+
+    void traverse(FDK_BITSTREAM *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        persist_FDK_BITBUF.traverse(&ptr->hBitBuf, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static FDK_BITSTREAM_PersistInfo persist_FDK_BITSTREAM;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 // TRANSPORTDEC [ has sub-structs]
@@ -1393,8 +1457,9 @@ struct TRANSPORTDEC_PersistInfo : SparseStructPersistInfo {
     TRANSPORTDEC_PersistInfo()
         : SparseStructPersistInfo(sizeof(TRANSPORTDEC))
     {
-        TODO
-        // SKIP_FIELD(AAC_DECODER_INSTANCE, X, Y);
+        SKIP_FIELD(TRANSPORTDEC, CSTpCallBacks, callbacks);
+        SKIP_ARRAY_FIELD(TRANSPORTDEC, FDK_BITSTREAM, bitStream, 2);
+        SKIP_FIELD(TRANSPORTDEC, UCHAR*, bsBuffer);
     }
 
     void traverse(TRANSPORTDEC *ptr, PersistenceTraversalData& td)
@@ -1404,37 +1469,21 @@ struct TRANSPORTDEC_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // TRANSPORTDEC:
-        TODO
+        // don't persist CSTpCallBacks
+
+        for (int i=0; i < 2; ++i)
+            persist_FDK_BITSTREAM.traverse(&ptr->bitStream[i], td);
+
+        // TRANSPORTDEC::parser is flat
+        // TRANSPORTDEC::asc CSAudioSpecificConfig is flat
+
+        if (ptr->bsBuffer)
+            readOrWriteStruct(ptr->bsBuffer, TRANSPORTDEC_INBUF_SIZE, td);
 
         LEAVE_TRAVERSAL
     }
 };
 static TRANSPORTDEC_PersistInfo persist_TRANSPORTDEC;
-
-//////////////////////////////////////////////////////////////////////////////////////////////
-// SamplingRateInfo [has pointers]
-
-struct SamplingRateInfo_PersistInfo : SparseStructPersistInfo {
-    SamplingRateInfo_PersistInfo()
-        : SparseStructPersistInfo(sizeof(SamplingRateInfo))
-    {
-        TODO
-        // SKIP_FIELD(SamplingRateInfo, X, Y);
-    }
-
-    void traverse(SamplingRateInfo *ptr, PersistenceTraversalData& td)
-    {
-        ENTER_TRAVERSAL
-
-        readOrWrite_(ptr, td);
-
-        // SamplingRateInfo:
-        TODO
-
-        LEAVE_TRAVERSAL
-    }
-};
-static SamplingRateInfo_PersistInfo persist_SamplingRateInfo;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 // CStreamInfo [has pointers]
@@ -1443,8 +1492,8 @@ struct CStreamInfo_PersistInfo : SparseStructPersistInfo {
     CStreamInfo_PersistInfo()
         : SparseStructPersistInfo(sizeof(CStreamInfo))
     {
-        TODO
-        // SKIP_FIELD(CStreamInfo, X, Y);
+        SKIP_FIELD(CStreamInfo, AUDIO_CHANNEL_TYPE*, pChannelType);
+        SKIP_FIELD(CStreamInfo, UCHAR*, pChannelIndices);
     }
 
     void traverse(CStreamInfo *ptr, PersistenceTraversalData& td)
@@ -1454,7 +1503,8 @@ struct CStreamInfo_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // CStreamInfo:
-        TODO
+        // pChannelType and pChannelIndices are set to static arrays.
+        // REVIEW shouldn't need to persist if decoder is correctly configured.
 
         LEAVE_TRAVERSAL
     }
@@ -1468,8 +1518,12 @@ struct CAacDecoderChannelInfo_PersistInfo : SparseStructPersistInfo {
     CAacDecoderChannelInfo_PersistInfo()
         : SparseStructPersistInfo(sizeof(CAacDecoderChannelInfo))
     {
-        TODO
-        // SKIP_FIELD(CAacDecoderChannelInfo, X, Y);
+        SKIP_FIELD(CAacDecoderChannelInfo, SPECTRAL_PTR, pSpectralCoefficient);
+
+        SKIP_FIELD(CAacDecoderChannelInfo, CPnsData, data);
+
+        SKIP_FIELD(CAacDecoderChannelInfo, CAacDecoderDynamicData*, pDynData);
+        SKIP_FIELD(CAacDecoderChannelInfo, CAacDecoderCommonData*, pComData);
     }
 
     void traverse(CAacDecoderChannelInfo *ptr, PersistenceTraversalData& td)
@@ -1479,7 +1533,10 @@ struct CAacDecoderChannelInfo_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // CAacDecoderChannelInfo:
-        TODO
+        // pSpectralCoefficient and data "can be overwritten after time signal rendering."
+        // CIcsInfo is flat
+        // CAacDecoderDynamicData *pDynData; only required during decoding
+        // CAacDecoderCommonData  *pComData; only required during decoding
 
         LEAVE_TRAVERSAL
     }
@@ -1487,14 +1544,102 @@ struct CAacDecoderChannelInfo_PersistInfo : SparseStructPersistInfo {
 static CAacDecoderChannelInfo_PersistInfo persist_CAacDecoderChannelInfo;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
+// CConcealmentInfo [has pointers]
+
+static ContiguousStructPersistInfo_T<CConcealParams> persist_CConcealParams;
+
+struct CConcealmentInfo_PersistInfo : SparseStructPersistInfo {
+    CConcealmentInfo_PersistInfo()
+        : SparseStructPersistInfo(sizeof(CConcealmentInfo))
+    {
+        SKIP_FIELD(CConcealmentInfo, CConcealParams*, pConcealParams);
+    }
+
+    void traverse(CConcealmentInfo *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // CConcealmentInfo:
+
+        persist_CConcealParams.readOrWrite(ptr->pConcealParams, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static CConcealmentInfo_PersistInfo persist_CConcealmentInfo;
+
+//////////////////////////////////////////////////////////////////////////////////////////////
 // CAacDecoderStaticChannelInfo [has pointers]
+
+// seems easier to scan the array directly than to work out baked parameters for FDKgetWindowSlope.
+
+struct WindowsSlopeParameters {
+    int shape;
+    int rasterand;
+    int length;
+};
+
+static WindowsSlopeParameters findWindowSlopeParameters(const FIXP_WTP *windowSlope)
+{
+    WindowsSlopeParameters result = { 0, 0, 0 };
+
+    for (int shape=0; shape < 2; ++shape) { // shape&1 is used in FDKgetWindowSlope so we only need to search for 
+        for (int rasterand=0; rasterand < 3; ++rasterand) {
+            for (int length=0; length < 9; ++length) {
+                if (windowSlopes[shape][rasterand][length] == windowSlope)
+                    return WindowsSlopeParameters {shape, rasterand, length};
+            }
+        }
+    }
+
+    assert(false); // should have found it
+    return result;
+}
+
+struct mdct_t_PersistInfo : SparseStructPersistInfo {
+    mdct_t_PersistInfo()
+        : SparseStructPersistInfo(sizeof(mdct_t))
+    {
+        SKIP_FIELD(mdct_t, FIXP_DBL*, overlap);
+        SKIP_FIELD(mdct_t, FIXP_DBL*, prev_wrs);
+    }
+
+    void traverse(mdct_t *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // mdct_t:
+        // overlap.freq/ overlap.time point to pOverlapBuffer, which is handled in CAacDecoderStaticChannelInfo_PersistInfo
+        
+        // prev_wrs points to one of the static lookup tables returned by FDKgetWindowSlope
+
+        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+            WindowsSlopeParameters p;
+            readOrWriteStruct(&p, sizeof(WindowsSlopeParameters), td);
+            ptr->prev_wrs = windowSlopes[p.shape][p.rasterand][p.length];
+        } else {
+            assert (td.type == PersistenceTraversalData::TraversalType::WRITE);
+
+            WindowsSlopeParameters p = findWindowSlopeParameters(ptr->prev_wrs);
+            readOrWriteStruct(&p, sizeof(WindowsSlopeParameters), td);
+        }
+        
+        LEAVE_TRAVERSAL
+    }
+};
+static mdct_t_PersistInfo persist_mdct_t;
 
 struct CAacDecoderStaticChannelInfo_PersistInfo : SparseStructPersistInfo {
     CAacDecoderStaticChannelInfo_PersistInfo()
         : SparseStructPersistInfo(sizeof(CAacDecoderStaticChannelInfo))
     {
-        TODO
-        // SKIP_FIELD(CAacDecoderStaticChannelInfo, X, Y);
+        SKIP_FIELD(CAacDecoderStaticChannelInfo, FIXP_DBL*, pOverlapBuffer);
+        SKIP_FIELD(CAacDecoderStaticChannelInfo, mdct_t, IMdct);
+        SKIP_FIELD(CAacDecoderStaticChannelInfo, CConcealmentInfo, concealmentInfo);
     }
 
     void traverse(CAacDecoderStaticChannelInfo *ptr, PersistenceTraversalData& td)
@@ -1504,7 +1649,10 @@ struct CAacDecoderStaticChannelInfo_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // CAacDecoderStaticChannelInfo:
-        TODO
+        readOrWriteStruct(ptr->pOverlapBuffer, sizeof(FIXP_DBL)*OverlapBufferSize, td);
+        persist_mdct_t.traverse(&ptr->IMdct, td);
+        // CDrcChannelData is flat
+        persist_CConcealmentInfo.traverse(&ptr->concealmentInfo, td);
 
         LEAVE_TRAVERSAL
     }
@@ -1514,6 +1662,7 @@ static CAacDecoderStaticChannelInfo_PersistInfo persist_CAacDecoderStaticChannel
 //////////////////////////////////////////////////////////////////////////////////////////////
 // CAacDecoderCommonData [has pointers, possibly skip work buffer and overlay]
 
+# if 0
 struct CAacDecoderCommonData_PersistInfo : SparseStructPersistInfo {
     CAacDecoderCommonData_PersistInfo()
         : SparseStructPersistInfo(sizeof(CAacDecoderCommonData))
@@ -1535,16 +1684,377 @@ struct CAacDecoderCommonData_PersistInfo : SparseStructPersistInfo {
     }
 };
 static CAacDecoderCommonData_PersistInfo persist_CAacDecoderCommonData;
+#endif
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 // SBR_DECODER_INSTANCE [ has pointers ]
+
+struct QMF_FILTER_BANK_PersistInfo : SparseStructPersistInfo {
+    QMF_FILTER_BANK_PersistInfo()
+        : SparseStructPersistInfo(sizeof(QMF_FILTER_BANK))
+    {
+        SKIP_FIELD(QMF_FILTER_BANK, const FIXP_PFT *, p_filter);
+        SKIP_FIELD(QMF_FILTER_BANK, void *, FilterStates);
+        SKIP_FIELD(QMF_FILTER_BANK, const FIXP_QTW *, t_cos);
+        SKIP_FIELD(QMF_FILTER_BANK, const FIXP_QTW *, t_sin);
+    }
+
+    void traverse(QMF_FILTER_BANK *ptr, size_t stateSize, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // QMF_FILTER_BANK:
+        // QMF_FILTER_BANK::const FIXP_PFT *p_filter; // static lookup table
+        
+        // QMF_FILTER_BANK::void *FilterStates;           /*!< Pointer to buffer of filter states
+        //                             FIXP_PCM in analyse and
+        //                             FIXP_DBL in synthesis filter */
+
+        size_t filterStatesSize = (2*QMF_NO_POLY-1)*ptr->no_channels*stateSize;
+        readOrWriteStruct(ptr->FilterStates, filterStatesSize, td);
+
+        // QMF_FILTER_BANK::const FIXP_QTW *t_cos; // static lookup table
+        // QMF_FILTER_BANK::const FIXP_QTW *t_sin; // static lookup table
+
+        LEAVE_TRAVERSAL
+    }
+};
+static QMF_FILTER_BANK_PersistInfo persist_QMF_FILTER_BANK;
+
+///
+
+struct SBR_LPP_TRANS_PersistInfo : SparseStructPersistInfo {
+    SBR_LPP_TRANS_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_LPP_TRANS))
+    {
+        SKIP_FIELD(SBR_LPP_TRANS, TRANSPOSER_SETTINGS*, pSettings);
+    }
+
+    void traverse(SBR_LPP_TRANS *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_LPP_TRANS:
+        // TRANSPOSER_SETTINGS
+        readOrWriteStruct(ptr->pSettings, sizeof(TRANSPOSER_SETTINGS), td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_LPP_TRANS_PersistInfo persist_SBR_LPP_TRANS;
+
+struct SBR_DEC_PersistInfo : SparseStructPersistInfo {
+
+#define QMF_BUFFER_ITEM_COUNT ((((1024)/(32))+(6)))
+
+    SBR_DEC_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_DEC))
+    {
+        SKIP_FIELD(SBR_DEC, QMF_FILTER_BANK, AnalysiscQMF);
+        SKIP_FIELD(SBR_DEC, QMF_FILTER_BANK, SynthesisQMF);
+        SKIP_FIELD(SBR_DEC, SBR_LPP_TRANS, LppTrans);
+        SKIP_FIELD(SBR_DEC, FIXP_DBL*, pSbrOverlapBuffer);
+        SKIP_FIELD(SBR_DEC, FIXP_DBL*, WorkBuffer1);
+        SKIP_FIELD(SBR_DEC, FIXP_DBL*, WorkBuffer2);
+
+        SKIP_FIELD(SBR_DEC, FIXP_QSS*, pSynQmfStates);
+
+        SKIP_ARRAY_FIELD(SBR_DEC, FIXP_DBL*, QmfBufferReal, QMF_BUFFER_ITEM_COUNT);
+        SKIP_ARRAY_FIELD(SBR_DEC, FIXP_DBL*, QmfBufferImag, QMF_BUFFER_ITEM_COUNT);
+    }
+
+// encode which buffer is used in the top bits
+#define QMF_BUFFER_SOURCE_MASK 0xC0000000
+#define QMF_BUFFER_SOURCE_NONE 0x00000000
+#define QMF_BUFFER_SOURCE_WB1  0x40000000
+#define QMF_BUFFER_SOURCE_WB2 0x80000000
+#define QMF_BUFFER_SOURCE_OVLP 0xC0000000
+#define QMF_BUFFER_INDEX_MASK   0x3FFFFFFF
+
+    void computeQmfBufferOffsets(size_t *realOffsets, size_t *imagOffsets, const SBR_DEC *ptr)
+    {
+        const FIXP_DBL *pSbrOverlapBufferBegin = ptr->pSbrOverlapBuffer;
+        const FIXP_DBL *pSbrOverlapBufferEnd = ptr->pSbrOverlapBuffer + (2 * (6) * (64));
+        const FIXP_DBL *WorkBuffer1Begin = ptr->WorkBuffer1;
+        const FIXP_DBL *WorkBuffer1End = ptr->WorkBuffer1 + (((1024)/(32))*(64));
+        const FIXP_DBL *WorkBuffer2Begin = ptr->WorkBuffer2;
+        const FIXP_DBL *WorkBuffer2End = ptr->WorkBuffer2 + (((1024)/(32))*(64));
+
+        for (int i = 0; i < QMF_BUFFER_ITEM_COUNT; ++i) {
+
+            // real
+            if (ptr->QmfBufferReal[i] >= pSbrOverlapBufferBegin && ptr->QmfBufferReal[i] < pSbrOverlapBufferEnd) {
+
+                realOffsets[i] = (ptr->QmfBufferReal[i] - pSbrOverlapBufferBegin) | QMF_BUFFER_SOURCE_OVLP;
+
+            } else if (ptr->QmfBufferReal[i] >= WorkBuffer1Begin && ptr->QmfBufferReal[i] < WorkBuffer1End) {
+
+                realOffsets[i] = (ptr->QmfBufferReal[i] - WorkBuffer1Begin) | QMF_BUFFER_SOURCE_WB1;
+
+            } else if (ptr->QmfBufferReal[i] >= WorkBuffer2Begin && ptr->QmfBufferReal[i] < WorkBuffer2End) {
+
+                realOffsets[i] = (ptr->QmfBufferReal[i] - WorkBuffer2Begin) | QMF_BUFFER_SOURCE_WB2;
+
+            } else {
+                realOffsets[i] = 0;
+            }
+
+            // imag
+            if (ptr->QmfBufferImag[i] >= pSbrOverlapBufferBegin && ptr->QmfBufferImag[i] < pSbrOverlapBufferEnd) {
+
+                imagOffsets[i] = (ptr->QmfBufferImag[i] - pSbrOverlapBufferBegin) | QMF_BUFFER_SOURCE_OVLP;
+
+            }
+            else if (ptr->QmfBufferImag[i] >= WorkBuffer1Begin && ptr->QmfBufferImag[i] < WorkBuffer1End) {
+
+                imagOffsets[i] = (ptr->QmfBufferImag[i] - WorkBuffer1Begin) | QMF_BUFFER_SOURCE_WB1;
+
+            }
+            else if (ptr->QmfBufferImag[i] >= WorkBuffer2Begin && ptr->QmfBufferImag[i] < WorkBuffer2End) {
+
+                imagOffsets[i] = (ptr->QmfBufferImag[i] - WorkBuffer2Begin) | QMF_BUFFER_SOURCE_WB2;
+
+            }
+            else {
+                imagOffsets[i] = 0;
+            }
+        }
+    }
+
+    void restoreQmfBufferPtrs(SBR_DEC *ptr, const size_t *realOffsets, const size_t *imagOffsets)
+    {
+        for (int i=0; i < QMF_BUFFER_ITEM_COUNT; ++i) {
+        
+            size_t rei = realOffsets[i];
+            FIXP_DBL *reptr = 0;
+            switch (rei&QMF_BUFFER_SOURCE_MASK) {
+                case QMF_BUFFER_SOURCE_WB1:
+                    reptr = ptr->WorkBuffer1 + (rei&QMF_BUFFER_INDEX_MASK);
+                    break;
+                case QMF_BUFFER_SOURCE_WB2:
+                    reptr = ptr->WorkBuffer2 + (rei&QMF_BUFFER_INDEX_MASK);
+                    break;
+                case QMF_BUFFER_SOURCE_OVLP:
+                    reptr = ptr->pSbrOverlapBuffer + (rei&QMF_BUFFER_INDEX_MASK);
+                    break;
+                // else fallthrough and assign 0
+            }
+            // note: only real coefficients will be set if using LP/LC mode
+            //if (reptr != ptr->QmfBufferReal[i]) {
+            //    fprintf(stderr, "xre\n");
+            //}
+            ptr->QmfBufferReal[i] = reptr;
+
+
+            size_t imi = imagOffsets[i];
+            FIXP_DBL *imptr = 0;
+            switch (imi&QMF_BUFFER_SOURCE_MASK) {
+            case QMF_BUFFER_SOURCE_WB1:
+                imptr = ptr->WorkBuffer1 + (imi&QMF_BUFFER_INDEX_MASK);
+                break;
+            case QMF_BUFFER_SOURCE_WB2:
+                imptr = ptr->WorkBuffer2 + (imi&QMF_BUFFER_INDEX_MASK);
+                break;
+            case QMF_BUFFER_SOURCE_OVLP:
+                imptr = ptr->pSbrOverlapBuffer + (imi&QMF_BUFFER_INDEX_MASK);
+                break;
+            // else fallthrough and assign 0
+            }
+            //if (imptr != ptr->QmfBufferImag[i]) {
+            //    fprintf(stderr, "xim\n");
+            //}
+            ptr->QmfBufferImag[i] = imptr;
+        }
+    }
+
+    void traverse(SBR_DEC *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_DEC:
+        //persist_QMF_FILTER_BANK.traverse(&ptr->AnalysiscQMF, sizeof(FIXP_QAS), td);
+        //persist_QMF_FILTER_BANK.traverse(&ptr->SynthesisQMF, sizeof(FIXP_QAS), td);
+
+        // REVIEW comment in persist_QMF_FILTER_BANK code suggests state sizes differ:
+        persist_QMF_FILTER_BANK.traverse(&ptr->AnalysiscQMF, sizeof(FIXP_PCM), td);
+        persist_QMF_FILTER_BANK.traverse(&ptr->SynthesisQMF, sizeof(FIXP_DBL), td);
+        
+        // SBR_CALCULATE_ENVELOPE flat struct
+        persist_SBR_LPP_TRANS.traverse(&ptr->LppTrans, td);
+        // QMF_SCALE_FACTOR flat struct
+
+        // pSbrOverlapBuffer
+        size_t pSbrOverlapBufferSize = sizeof(FIXP_DBL)*(2 * (6) * (64));
+        readOrWriteStruct(ptr->pSbrOverlapBuffer, pSbrOverlapBufferSize, td);
+
+        // skip WorkBuffer1, WorkBuffer2
+
+        // pSynQmfStates
+        size_t pSynQmfStatesSize = sizeof(FIXP_QSS)*((640)-(64));
+        readOrWriteStruct(ptr->pSynQmfStates, pSynQmfStatesSize, td);
+
+        // FIXME REVIEW I suspect that we need QmfBufferReal, QmfBufferImag because they don't seem to be updated every frame.
+
+        size_t qmfBufferRealOffsets[QMF_BUFFER_ITEM_COUNT];
+        size_t qmfBufferImagOffsets[QMF_BUFFER_ITEM_COUNT];
+
+        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+            readOrWriteStruct(&qmfBufferRealOffsets, QMF_BUFFER_ITEM_COUNT*sizeof(size_t), td);
+            readOrWriteStruct(&qmfBufferImagOffsets, QMF_BUFFER_ITEM_COUNT*sizeof(size_t), td);
+
+            restoreQmfBufferPtrs(ptr, qmfBufferRealOffsets, qmfBufferImagOffsets);
+        }
+        else {
+            assert(td.type == PersistenceTraversalData::TraversalType::WRITE);
+            
+            computeQmfBufferOffsets(qmfBufferRealOffsets, qmfBufferImagOffsets, ptr);
+
+            readOrWriteStruct(&qmfBufferRealOffsets, QMF_BUFFER_ITEM_COUNT*sizeof(size_t), td);
+            readOrWriteStruct(&qmfBufferImagOffsets, QMF_BUFFER_ITEM_COUNT*sizeof(size_t), td);
+        }
+
+        // SBRDEC_DRC_CHANNEL flat struct
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_DEC_PersistInfo persist_SBR_DEC;
+
+
+struct SBR_CHANNEL_PersistInfo : SparseStructPersistInfo {
+    SBR_CHANNEL_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_CHANNEL))
+    {
+        SKIP_FIELD(SBR_CHANNEL, SBR_DEC, SbrDec);
+    }
+
+    void traverse(SBR_CHANNEL *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_CHANNEL:
+        // SBR_FRAME_DATA flat struct
+        // SBR_PREV_FRAME_DATA flat struct
+        // SBR_DEC
+        persist_SBR_DEC.traverse(&ptr->SbrDec, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_CHANNEL_PersistInfo persist_SBR_CHANNEL;
+
+
+struct SBR_DECODER_ELEMENT_PersistInfo : SparseStructPersistInfo {
+    SBR_DECODER_ELEMENT_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_DECODER_ELEMENT))
+    {
+        SKIP_ARRAY_FIELD(SBR_DECODER_ELEMENT, SBR_CHANNEL*, pSbrChannel, SBRDEC_MAX_CH_PER_ELEMENT);
+        SKIP_FIELD(SBR_DECODER_ELEMENT, HANDLE_FDK_BITSTREAM, hBs);
+    }
+
+    void traverse(SBR_DECODER_ELEMENT *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // SBR_DECODER_ELEMENT:
+        // SBR_CHANNEL [SBRDEC_MAX_CH_PER_ELEMENT]
+        for (int i = 0; i < SBRDEC_MAX_CH_PER_ELEMENT; ++i)
+            persist_SBR_CHANNEL.traverse(ptr->pSbrChannel[i], td);
+
+        // TRANSPOSER_SETTINGS is flat
+        // HANDLE_FDK_BITSTREAM
+        persist_FDK_BITSTREAM.traverse(ptr->hBs, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_DECODER_ELEMENT_PersistInfo persist_SBR_DECODER_ELEMENT;
+
+
+struct PS_DEC_PersistInfo : SparseStructPersistInfo {
+    PS_DEC_PersistInfo()
+        : SparseStructPersistInfo(sizeof(PS_DEC))
+    {
+        SKIP_FIELD(PS_DEC, PS_DEC_COEFFICIENTS, specificTo.mpeg.coef);
+    }
+
+    void traverse(PS_DEC *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // PS_DEC:
+        // flat struct. but PS_DEC_COEFFICIENTS is marked as "reusable scratch memory" so skip it.
+
+        LEAVE_TRAVERSAL
+    }
+};
+static PS_DEC_PersistInfo persist_PS_DEC;
+
+
+struct FREQ_BAND_DATA_PersistInfo : SparseStructPersistInfo {
+    FREQ_BAND_DATA_PersistInfo()
+        : SparseStructPersistInfo(sizeof(FREQ_BAND_DATA))
+    {
+        SKIP_ARRAY_FIELD(FREQ_BAND_DATA, UCHAR*, freqBandTable, 2);
+    }
+
+    void traverse(FREQ_BAND_DATA *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // freqBandTable is just redundant pointers to fields freqBandTableLo and freqBandTableHi
+
+        LEAVE_TRAVERSAL
+    }
+};
+static FREQ_BAND_DATA_PersistInfo persist_FREQ_BAND_DATA;
+
+
+struct SBR_HEADER_DATA_PersistInfo : SparseStructPersistInfo {
+    SBR_HEADER_DATA_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SBR_HEADER_DATA))
+    {
+        SKIP_FIELD(SBR_HEADER_DATA, FREQ_BAND_DATA, freqBandData);
+    }
+
+    void traverse(SBR_HEADER_DATA *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        readOrWrite_(ptr, td);
+
+        // FREQ_BAND_DATA
+        persist_FREQ_BAND_DATA.traverse(&ptr->freqBandData, td);
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SBR_HEADER_DATA_PersistInfo persist_SBR_HEADER_DATA;
+
 
 struct SBR_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
     SBR_DECODER_INSTANCE_PersistInfo()
         : SparseStructPersistInfo(sizeof(SBR_DECODER_INSTANCE))
     {
-        TODO
-        // SKIP_FIELD(SBR_DECODER_INSTANCE, X, Y);
+        SKIP_ARRAY_FIELD(SBR_DECODER_INSTANCE, SBR_DECODER_ELEMENT*, pSbrElement, 8);
+        SKIP_ARRAY_FIELD(SBR_DECODER_INSTANCE, SBR_HEADER_DATA, sbrHeader, (8)*((1)+1));
+        SKIP_FIELD(SBR_DECODER_INSTANCE, FIXP_DBL*, workBuffer1);
+        SKIP_FIELD(SBR_DECODER_INSTANCE, FIXP_DBL*, workBuffer2);
+        SKIP_FIELD(SBR_DECODER_INSTANCE, HANDLE_PS_DEC, hParametricStereoDec);
     }
 
     void traverse(SBR_DECODER_INSTANCE *ptr, PersistenceTraversalData& td)
@@ -1552,9 +2062,20 @@ struct SBR_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         ENTER_TRAVERSAL
 
         readOrWrite_(ptr, td);
-
+        
         // SBR_DECODER_INSTANCE:
-        TODO
+        // SBR_DECODER_ELEMENT [8]
+        for (int i=0; i < 8; ++i)
+            persist_SBR_DECODER_ELEMENT.traverse(ptr->pSbrElement[i], td);
+
+        for (int i=0; i<8;++i)
+            for (int j=0; i < 2; ++i)
+                persist_SBR_HEADER_DATA.traverse(&ptr->sbrHeader[i][j], td);
+
+        // skip workBuffer1, workBuffer2
+
+        // HANDLE_PS_DEC
+        persist_PS_DEC.traverse(ptr->hParametricStereoDec, td);
 
         LEAVE_TRAVERSAL
     }
@@ -1568,8 +2089,7 @@ struct CAncData_PersistInfo : SparseStructPersistInfo {
     CAncData_PersistInfo()
         : SparseStructPersistInfo(sizeof(CAncData))
     {
-        TODO
-        // SKIP_FIELD(CAncData, X, Y);
+        SKIP_FIELD(CAncData, char*, buffer);
     }
 
     void traverse(CAncData *ptr, PersistenceTraversalData& td)
@@ -1579,7 +2099,9 @@ struct CAncData_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // CAncData:
-        TODO
+        // :: buffer
+        if (ptr->buffer)
+            readOrWriteStruct(ptr->buffer, ptr->bufferSize, td);
 
         LEAVE_TRAVERSAL
     }
@@ -1593,8 +2115,8 @@ struct TDLimiter_PersistInfo : SparseStructPersistInfo {
     TDLimiter_PersistInfo()
         : SparseStructPersistInfo(sizeof(TDLimiter))
     {
-        TODO
-        // SKIP_FIELD(TDLimiter, X, Y);
+        SKIP_FIELD(TDLimiter, FIXP_DBL*, maxBuf);
+        SKIP_FIELD(TDLimiter, FIXP_DBL*, delayBuf);
     }
 
     void traverse(TDLimiter *ptr, PersistenceTraversalData& td)
@@ -1604,7 +2126,11 @@ struct TDLimiter_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // TDLimiter:
-        TODO
+        size_t maxBufSize = (ptr->attack + 1) * sizeof(FIXP_DBL);
+        readOrWriteStruct(ptr->maxBuf, maxBufSize, td);
+
+        size_t delayBufSize = (ptr->attack * ptr->maxChannels) * sizeof(FIXP_DBL);
+        readOrWriteStruct(ptr->delayBuf, delayBufSize, td);
 
         LEAVE_TRAVERSAL
     }
@@ -1645,7 +2171,7 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         persist_TRANSPORTDEC.traverse(ptr->hInput, td);
 
         // AAC_DECODER_INSTANCE::SamplingRateInfo [has pointers]
-        persist_SamplingRateInfo.traverse(&ptr->samplingRateInfo, td);
+        // REVIEW SamplingRateInfo contains static information that shouldn't need to be changed.
 
         // FIXME REVIEW const UCHAR         (*channelOutputMapping)[8]; ???? skip?
 
@@ -1663,9 +2189,11 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         for (int i = 0; i < 8; ++i) {
             persist_CAacDecoderStaticChannelInfo.traverse(ptr->pAacDecoderStaticChannelInfo[i], td);
         }
-        
-        // AAC_DECODER_INSTANCE::CAacDecoderCommonData [contains pointers, possibly skip work buffer and overlay]
-        persist_CAacDecoderCommonData.traverse(&ptr->aacCommonData, td);
+    
+        //// AAC_DECODER_INSTANCE::CAacDecoderCommonData [contains pointers]
+        // "Data required for one channel at a time during decode"
+        // "pComData->overlay memory pointed to can be overwritten after each CChannelElement_Decode() call.."
+        // persist_CAacDecoderCommonData.traverse(&ptr->aacCommonData, td);
 
         // AAC_DECODER_INSTANCE::CConcealParams [flat]
 
@@ -1683,7 +2211,7 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
 
         // AAC_DECODER_INSTANCE::HANDLE_PCM_DOWNMIX -> PCM_DMX_INSTANCE [flat struct?]
         persist_PCM_DMX_INSTANCE.readOrWrite(ptr->hPcmUtils, td);
-
+        
         // TDLimiterPtr -> TDLimiter [contains pointers]
         persist_TDLimiter.traverse(ptr->hLimiter, td);
 
