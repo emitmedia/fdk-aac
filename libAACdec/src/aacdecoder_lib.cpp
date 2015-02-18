@@ -1460,6 +1460,7 @@ struct TRANSPORTDEC_PersistInfo : SparseStructPersistInfo {
         SKIP_FIELD(TRANSPORTDEC, CSTpCallBacks, callbacks);
         SKIP_ARRAY_FIELD(TRANSPORTDEC, FDK_BITSTREAM, bitStream, 2);
         SKIP_FIELD(TRANSPORTDEC, UCHAR*, bsBuffer);
+        SKIP_ARRAY_FIELD(TRANSPORTDEC,CSAudioSpecificConfig, asc, 2);
     }
 
     void traverse(TRANSPORTDEC *ptr, PersistenceTraversalData& td)
@@ -1476,8 +1477,18 @@ struct TRANSPORTDEC_PersistInfo : SparseStructPersistInfo {
 
         // TRANSPORTDEC::parser is flat
 
-        // REVIEW CSAudioSpecificConfig could be saved separately and used to restore the codec state
-        // TRANSPORTDEC::asc CSAudioSpecificConfig is flat
+        // TRANSPORTDEC::asc CSAudioSpecificConfig is flat. we only have special handling here to capture the file offset.
+
+        if (td.type == PersistenceTraversalData::TraversalType::WRITE) {
+             // update CSAudioSpecificConfigOffset stored at start of file
+             long int CSAudioSpecificConfigOffset = ftell(td.fp);
+             fseek(td.fp, 0, SEEK_SET);
+             fwrite(&CSAudioSpecificConfigOffset, sizeof(CSAudioSpecificConfigOffset), 1, td.fp);
+             fseek(td.fp, CSAudioSpecificConfigOffset, SEEK_SET);
+        }
+
+        for (int i=0; i < 2; ++i)
+            readOrWriteStruct(&ptr->asc[i], sizeof(CSAudioSpecificConfig), td);
 
         if (ptr->bsBuffer) // bitstream buffer: REVIEW: may not need to write the whole buffer
             readOrWriteStruct(ptr->bsBuffer, TRANSPORTDEC_INBUF_SIZE, td);
@@ -2067,6 +2078,8 @@ struct SBR_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
 
         readOrWrite_(ptr, td);
         
+        // FIXME TODO: pSbrElement fails to load unless the element has already been allocated.
+
         // SBR_DECODER_INSTANCE:
         // SBR_DECODER_ELEMENT [8]
         for (int i=0; i < 8; ++i)
@@ -2192,6 +2205,36 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
     void traverse(AAC_DECODER_INSTANCE *ptr, PersistenceTraversalData& td)
     {
         ENTER_TRAVERSAL
+
+        // Special handling for configuring the decoder:
+        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+            // The first thing we do when loading the decoder is reconfigure it 
+            // to the correct audio settings using aacDecoder_Config. 
+            // The first long int in the file is an offset to the persisted
+            // CSAudioSpecificConfig structure.
+
+            long int CSAudioSpecificConfigOffset = 0;
+            fread( &CSAudioSpecificConfigOffset, sizeof(CSAudioSpecificConfigOffset), 1, td.fp );
+            long int pos = ftell(td.fp);
+
+            // seek to CSAudioSpecificConfig, load it, configure decoder, seek back to where we were.
+            fseek(td.fp, CSAudioSpecificConfigOffset, SEEK_SET);
+
+            CSAudioSpecificConfig asc;
+            readStruct(&asc, sizeof(CSAudioSpecificConfig), td.fp);
+
+            AAC_DECODER_ERROR errTp = aacDecoder_Config(ptr, &asc);
+            assert(errTp == AAC_DEC_OK);
+
+            fseek(td.fp, pos, SEEK_SET);
+
+        } else { // write
+            assert(td.type == PersistenceTraversalData::TraversalType::WRITE);
+
+            // Write null CSAudioSpecificConfig offset. This is updated when CSAudioSpecificConfigOffset is persisted.
+            long int CSAudioSpecificConfigOffset = 0;
+            fwrite( &CSAudioSpecificConfigOffset, sizeof(CSAudioSpecificConfigOffset), 1, td.fp );
+        }
 
         readOrWrite_(ptr, td);
 
