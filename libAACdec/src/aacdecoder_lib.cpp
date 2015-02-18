@@ -1411,12 +1411,12 @@ struct FDK_BITBUF_PersistInfo : SparseStructPersistInfo {
     {
         ENTER_TRAVERSAL
 
-        // assert(ptr->ValidBits == 0);
-        // REVIEW FIXME: the above assert fails and the bitstream indicates that it has valid bits at the end of the encode
+        //assert(ptr->ValidBits == 0);
+        //REVIEW FIXME: the above assert fails and the bitstream indicates that it has valid bits at the end of the decode
 
         readOrWrite_(ptr, td);
         
-        // The following FDK_BITBUF fields are initialized from tpEnc bsBuffer, which is inited from AACENCODER outBuffer
+        // The following FDK_BITBUF fields are initialized from TRANSPORTDEC bsBuffer, which is inited from AACENCODER outBuffer
         // at present we don't save any of this.
         /*
         UCHAR *Buffer;
@@ -1475,9 +1475,11 @@ struct TRANSPORTDEC_PersistInfo : SparseStructPersistInfo {
             persist_FDK_BITSTREAM.traverse(&ptr->bitStream[i], td);
 
         // TRANSPORTDEC::parser is flat
+
+        // REVIEW CSAudioSpecificConfig could be saved separately and used to restore the codec state
         // TRANSPORTDEC::asc CSAudioSpecificConfig is flat
 
-        if (ptr->bsBuffer)
+        if (ptr->bsBuffer) // bitstream buffer: REVIEW: may not need to write the whole buffer
             readOrWriteStruct(ptr->bsBuffer, TRANSPORTDEC_INBUF_SIZE, td);
 
         LEAVE_TRAVERSAL
@@ -1504,7 +1506,7 @@ struct CStreamInfo_PersistInfo : SparseStructPersistInfo {
 
         // CStreamInfo:
         // pChannelType and pChannelIndices are set to static arrays.
-        // REVIEW shouldn't need to persist if decoder is correctly configured.
+        // REVIEW ASSUMPTION Shouldn't need to persist if decoder is correctly configured.
 
         LEAVE_TRAVERSAL
     }
@@ -1662,12 +1664,13 @@ static CAacDecoderStaticChannelInfo_PersistInfo persist_CAacDecoderStaticChannel
 //////////////////////////////////////////////////////////////////////////////////////////////
 // CAacDecoderCommonData [has pointers, possibly skip work buffer and overlay]
 
-# if 0
+//"pComData->overlay memory pointed to can be overwritten after each CChannelElement_Decode() call.."
+
+# if 0 // unused
 struct CAacDecoderCommonData_PersistInfo : SparseStructPersistInfo {
     CAacDecoderCommonData_PersistInfo()
         : SparseStructPersistInfo(sizeof(CAacDecoderCommonData))
     {
-        TODO
         // SKIP_FIELD(CAacDecoderCommonData, X, Y);
     }
 
@@ -1678,8 +1681,6 @@ struct CAacDecoderCommonData_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // CAacDecoderCommonData:
-        TODO
-
         LEAVE_TRAVERSAL
     }
 };
@@ -1703,7 +1704,11 @@ struct QMF_FILTER_BANK_PersistInfo : SparseStructPersistInfo {
     {
         ENTER_TRAVERSAL
 
+        int oldNoChannels = ptr->no_channels;
+
         readOrWrite_(ptr, td);
+
+        assert( ptr->no_channels == oldNoChannels ); // if this fails then we should be saving/restoring the static lookup tables as they are selected based on no_channels
 
         // QMF_FILTER_BANK:
         // QMF_FILTER_BANK::const FIXP_PFT *p_filter; // static lookup table
@@ -1878,12 +1883,10 @@ struct SBR_DEC_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // SBR_DEC:
-        //persist_QMF_FILTER_BANK.traverse(&ptr->AnalysiscQMF, sizeof(FIXP_QAS), td);
-        //persist_QMF_FILTER_BANK.traverse(&ptr->SynthesisQMF, sizeof(FIXP_QAS), td);
 
-        // REVIEW comment in persist_QMF_FILTER_BANK code suggests state sizes differ:
-        persist_QMF_FILTER_BANK.traverse(&ptr->AnalysiscQMF, sizeof(FIXP_PCM), td);
-        persist_QMF_FILTER_BANK.traverse(&ptr->SynthesisQMF, sizeof(FIXP_DBL), td);
+        // Note comment in persist_QMF_FILTER_BANK code suggests state sizes differ:
+        persist_QMF_FILTER_BANK.traverse(&ptr->AnalysiscQMF, sizeof(FIXP_QAS), td);
+        persist_QMF_FILTER_BANK.traverse(&ptr->SynthesisQMF, sizeof(FIXP_QSS), td);
         
         // SBR_CALCULATE_ENVELOPE flat struct
         persist_SBR_LPP_TRANS.traverse(&ptr->LppTrans, td);
@@ -1899,7 +1902,8 @@ struct SBR_DEC_PersistInfo : SparseStructPersistInfo {
         size_t pSynQmfStatesSize = sizeof(FIXP_QSS)*((640)-(64));
         readOrWriteStruct(ptr->pSynQmfStates, pSynQmfStatesSize, td);
 
-        // FIXME REVIEW I suspect that we need QmfBufferReal, QmfBufferImag because they don't seem to be updated every frame.
+        // QmfBufferReal, QmfBufferImag 
+        // Not all elements of QmfBufferReal, QmfBufferImag are updated every frame. (omitting persisting them clicks).
 
         size_t qmfBufferRealOffsets[QMF_BUFFER_ITEM_COUNT];
         size_t qmfBufferImagOffsets[QMF_BUFFER_ITEM_COUNT];
@@ -1909,8 +1913,7 @@ struct SBR_DEC_PersistInfo : SparseStructPersistInfo {
             readOrWriteStruct(&qmfBufferImagOffsets, QMF_BUFFER_ITEM_COUNT*sizeof(size_t), td);
 
             restoreQmfBufferPtrs(ptr, qmfBufferRealOffsets, qmfBufferImagOffsets);
-        }
-        else {
+        } else {
             assert(td.type == PersistenceTraversalData::TraversalType::WRITE);
             
             computeQmfBufferOffsets(qmfBufferRealOffsets, qmfBufferImagOffsets, ptr);
@@ -1995,7 +1998,8 @@ struct PS_DEC_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // PS_DEC:
-        // flat struct. but PS_DEC_COEFFICIENTS is marked as "reusable scratch memory" so skip it.
+        // flat struct. 
+        // PS_DEC_COEFFICIENTS is marked as "reusable scratch memory" so skip it.
 
         LEAVE_TRAVERSAL
     }
@@ -2068,8 +2072,8 @@ struct SBR_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         for (int i=0; i < 8; ++i)
             persist_SBR_DECODER_ELEMENT.traverse(ptr->pSbrElement[i], td);
 
-        for (int i=0; i<8;++i)
-            for (int j=0; i < 2; ++i)
+        for (int i=0; i<8; ++i)
+            for (int j=0; j < 2; ++j)
                 persist_SBR_HEADER_DATA.traverse(&ptr->sbrHeader[i][j], td);
 
         // skip workBuffer1, workBuffer2
@@ -2139,6 +2143,31 @@ static TDLimiter_PersistInfo persist_TDLimiter;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 
+struct SamplingRateInfo_PersistInfo : SparseStructPersistInfo {
+    SamplingRateInfo_PersistInfo()
+        : SparseStructPersistInfo(sizeof(SamplingRateInfo))
+    {
+        // ASSUMPTION: sample rate doesn't change.
+        // FIXME REVIEW: we aren't currently saving the scale factor bands
+        SKIP_FIELD(SamplingRateInfo, SHORT*, ScaleFactorBands_Long);
+        SKIP_FIELD(SamplingRateInfo, SHORT*, ScaleFactorBands_Short);
+    }
+
+    void traverse(SamplingRateInfo *ptr, PersistenceTraversalData& td)
+    {
+        ENTER_TRAVERSAL
+
+        UINT oldSamplingRate = ptr->samplingRate;
+
+        readOrWrite_(ptr, td);
+
+        assert( ptr->samplingRate == oldSamplingRate ); // FIXME REVIEW if sample rates don't match then we should have persisted the scale factor bands
+
+        LEAVE_TRAVERSAL
+    }
+};
+static SamplingRateInfo_PersistInfo persist_SamplingRateInfo;
+
 static ContiguousStructPersistInfo_T<CDrcInfo> persist_CDrcInfo;
 static ContiguousStructPersistInfo_T<PCM_DMX_INSTANCE> persist_PCM_DMX_INSTANCE;
 
@@ -2171,9 +2200,34 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         persist_TRANSPORTDEC.traverse(ptr->hInput, td);
 
         // AAC_DECODER_INSTANCE::SamplingRateInfo [has pointers]
-        // REVIEW SamplingRateInfo contains static information that shouldn't need to be changed.
+        // REVIEW SamplingRateInfo is only updated when the stream sampling frequency changes
+        // Current code partially persists it and verifies that sample rate hasn't changed.
+        persist_SamplingRateInfo.traverse(&ptr->samplingRateInfo, td);
 
-        // FIXME REVIEW const UCHAR         (*channelOutputMapping)[8]; ???? skip?
+        // AAC_DECODER_INSTANCE :: UCHAR (*channelOutputMapping)[8];
+        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+            char channelOutputMappingFlag;
+            readOrWriteStruct(&channelOutputMappingFlag, 1, td);
+
+            if (channelOutputMappingFlag == 0) {
+                ptr->channelOutputMapping = channelMappingTablePassthrough;
+            } else {
+                assert( channelOutputMappingFlag == 1 );
+                ptr->channelOutputMapping = channelMappingTableWAV;
+            }
+        } else { // write
+            assert(td.type == PersistenceTraversalData::TraversalType::WRITE);
+
+            char channelOutputMappingFlag;
+            if (ptr->channelOutputMapping == channelMappingTablePassthrough) {
+                channelOutputMappingFlag = 0;
+            }  else {
+                assert(ptr->channelOutputMapping = channelMappingTableWAV);
+                channelOutputMappingFlag = 1;
+            }
+
+            readOrWriteStruct(&channelOutputMappingFlag, 1, td);
+        }
 
         // AAC_DECODER_INSTANCE::CProgramConfig [flat]
 
@@ -2209,7 +2263,7 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         // AAC_DECODER_INSTANCE::CAncData [contains pointer buffer]
         persist_CAncData.traverse(&ptr->ancData, td);
 
-        // AAC_DECODER_INSTANCE::HANDLE_PCM_DOWNMIX -> PCM_DMX_INSTANCE [flat struct?]
+        // AAC_DECODER_INSTANCE::HANDLE_PCM_DOWNMIX -> PCM_DMX_INSTANCE
         persist_PCM_DMX_INSTANCE.readOrWrite(ptr->hPcmUtils, td);
         
         // TDLimiterPtr -> TDLimiter [contains pointers]
