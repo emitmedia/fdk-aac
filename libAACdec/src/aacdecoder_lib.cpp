@@ -1143,11 +1143,16 @@ LINKSPEC_CPP INT aacDecoder_GetLibInfo ( LIB_INFO *info )
 #define RB_STATE_PERSISTENCE_EXTENSION
 #ifdef RB_STATE_PERSISTENCE_EXTENSION
 
+//#define RB_PRINT_TRACE
+
 #include <cassert>
 #include <cstdio>
-#include <cstdint>
+#include <stdexcept>
+#include <stdint.h> // cstdint is tr1 and C++11 only
 #include <map>
+#ifdef RB_PRINT_TRACE
 #include <typeinfo>
+#endif
 #include <vector>
 
 #include "../../libPCMutils/src/limiter_private.h"
@@ -1155,7 +1160,6 @@ LINKSPEC_CPP INT aacDecoder_GetLibInfo ( LIB_INFO *info )
 #include "../../libMpegTPDec/src/tpdec_lib_private.h"
 #include "../../libSBRdec/src/sbr_ram.h"
 
-//#define RB_PRINT_TRACE
 
 namespace {
 
@@ -1225,7 +1229,12 @@ namespace {
         }
 };
 
+#ifdef RB_PRINT_TRACE
 #define ENTER_TRAVERSAL { if (!td.enterTraversal(ptr, sizeof(*ptr), typeid(*this).name())) return; }
+#else
+#define ENTER_TRAVERSAL { if (!td.enterTraversal(ptr, sizeof(*ptr), "")) return; }
+#endif /* RB_PRINT_TRACE */    
+    
 #define LEAVE_TRAVERSAL { td.leaveTraversal(ptr, sizeof(*ptr)); }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
@@ -1479,7 +1488,7 @@ struct TRANSPORTDEC_PersistInfo : SparseStructPersistInfo {
 
         // TRANSPORTDEC::asc CSAudioSpecificConfig is flat. we only have special handling here to capture the file offset.
 
-        if (td.type == PersistenceTraversalData::TraversalType::WRITE) {
+        if (td.type == PersistenceTraversalData::WRITE) {
              // update CSAudioSpecificConfigOffset stored at start of file
              long int CSAudioSpecificConfigOffset = ftell(td.fp);
              fseek(td.fp, 0, SEEK_SET);
@@ -1589,6 +1598,11 @@ static CConcealmentInfo_PersistInfo persist_CConcealmentInfo;
 // seems easier to scan the array directly than to work out baked parameters for FDKgetWindowSlope.
 
 struct WindowsSlopeParameters {
+    WindowsSlopeParameters()
+        : shape(0), rasterand(0), length(0) {}
+    WindowsSlopeParameters( int s, int r, int l )
+        : shape(s), rasterand(r), length(l) {}
+    
     int shape;
     int rasterand;
     int length;
@@ -1596,13 +1610,13 @@ struct WindowsSlopeParameters {
 
 static WindowsSlopeParameters findWindowSlopeParameters(const FIXP_WTP *windowSlope)
 {
-    WindowsSlopeParameters result = { 0, 0, 0 };
+    WindowsSlopeParameters result;
 
     for (int shape=0; shape < 2; ++shape) { // shape&1 is used in FDKgetWindowSlope so we only need to search for 
         for (int rasterand=0; rasterand < 3; ++rasterand) {
             for (int length=0; length < 9; ++length) {
                 if (windowSlopes[shape][rasterand][length] == windowSlope)
-                    return WindowsSlopeParameters {shape, rasterand, length};
+                    return WindowsSlopeParameters(shape, rasterand, length);
             }
         }
     }
@@ -1630,12 +1644,12 @@ struct mdct_t_PersistInfo : SparseStructPersistInfo {
         
         // prev_wrs points to one of the static lookup tables returned by FDKgetWindowSlope
 
-        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+        if (td.type == PersistenceTraversalData::READ) {
             WindowsSlopeParameters p;
             readOrWriteStruct(&p, sizeof(WindowsSlopeParameters), td);
             ptr->prev_wrs = windowSlopes[p.shape][p.rasterand][p.length];
         } else {
-            assert (td.type == PersistenceTraversalData::TraversalType::WRITE);
+            assert (td.type == PersistenceTraversalData::WRITE);
 
             WindowsSlopeParameters p = findWindowSlopeParameters(ptr->prev_wrs);
             readOrWriteStruct(&p, sizeof(WindowsSlopeParameters), td);
@@ -1919,13 +1933,13 @@ struct SBR_DEC_PersistInfo : SparseStructPersistInfo {
         size_t qmfBufferRealOffsets[QMF_BUFFER_ITEM_COUNT];
         size_t qmfBufferImagOffsets[QMF_BUFFER_ITEM_COUNT];
 
-        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+        if (td.type == PersistenceTraversalData::READ) {
             readOrWriteStruct(&qmfBufferRealOffsets, QMF_BUFFER_ITEM_COUNT*sizeof(size_t), td);
             readOrWriteStruct(&qmfBufferImagOffsets, QMF_BUFFER_ITEM_COUNT*sizeof(size_t), td);
 
             restoreQmfBufferPtrs(ptr, qmfBufferRealOffsets, qmfBufferImagOffsets);
         } else {
-            assert(td.type == PersistenceTraversalData::TraversalType::WRITE);
+            assert(td.type == PersistenceTraversalData::WRITE);
             
             computeQmfBufferOffsets(qmfBufferRealOffsets, qmfBufferImagOffsets, ptr);
 
@@ -2207,7 +2221,7 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         ENTER_TRAVERSAL
 
         // Special handling for configuring the decoder:
-        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+        if (td.type == PersistenceTraversalData::READ) {
             // The first thing we do when loading the decoder is reconfigure it 
             // to the correct audio settings using aacDecoder_Config. 
             // The first long int in the file is an offset to the persisted
@@ -2229,7 +2243,7 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
             fseek(td.fp, pos, SEEK_SET);
 
         } else { // write
-            assert(td.type == PersistenceTraversalData::TraversalType::WRITE);
+            assert(td.type == PersistenceTraversalData::WRITE);
 
             // Write null CSAudioSpecificConfig offset. This is updated when CSAudioSpecificConfigOffset is persisted.
             long int CSAudioSpecificConfigOffset = 0;
@@ -2248,7 +2262,7 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
         persist_SamplingRateInfo.traverse(&ptr->samplingRateInfo, td);
 
         // AAC_DECODER_INSTANCE :: UCHAR (*channelOutputMapping)[8];
-        if (td.type == PersistenceTraversalData::TraversalType::READ) {
+        if (td.type == PersistenceTraversalData::READ) {
             char channelOutputMappingFlag;
             readOrWriteStruct(&channelOutputMappingFlag, 1, td);
 
@@ -2259,7 +2273,7 @@ struct AAC_DECODER_INSTANCE_PersistInfo : SparseStructPersistInfo {
                 ptr->channelOutputMapping = channelMappingTableWAV;
             }
         } else { // write
-            assert(td.type == PersistenceTraversalData::TraversalType::WRITE);
+            assert(td.type == PersistenceTraversalData::WRITE);
 
             char channelOutputMappingFlag;
             if (ptr->channelOutputMapping == channelMappingTablePassthrough) {

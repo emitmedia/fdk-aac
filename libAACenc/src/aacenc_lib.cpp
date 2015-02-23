@@ -105,7 +105,7 @@ amm-info@iis.fraunhofer.de
 
 
 #include "sbr_encoder.h"
-#include "../src/sbr_ram.h"
+#include "../../libSBRenc/src/sbr_ram.h"
 #include "channel_map.h"
 
 #include "psy_const.h"
@@ -2127,13 +2127,20 @@ bail:
 
 #include <cassert>
 #include <cstdio>
-#include <cstdint>
+#include <stdexcept>
+#include <stdint.h> // cstdint is tr1 and C++11 only
 #include <map>
 #include <vector>
 
 #include "metadata_main_private.h"
 #include "metadata_compressor_private.h"
 #include "../../libMpegTPEnc/src/tpenc_lib_private.h"
+
+#include "../../libSBRenc/src/resampler.h" // LP_FILTER
+#include "../../libSBRenc/src/code_env.h" //
+#include "../../libSBRenc/src/mh_det.h" //
+#include "../../libSBRenc/src/env_est.h" //
+#include "../../libSBRenc/src/sbr.h" /
 
 //#define RB_PRINT_TRACE
 
