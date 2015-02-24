@@ -2128,7 +2128,9 @@ bail:
 #include <cassert>
 #include <cstdio>
 #include <stdexcept>
+#include <stddef.h> // offsetof
 #include <stdint.h> // cstdint is tr1 and C++11 only
+#include <stdlib.h> // exit
 #include <map>
 #include <vector>
 
