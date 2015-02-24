@@ -2142,7 +2142,7 @@ bail:
 #include "../../libSBRenc/src/code_env.h" //
 #include "../../libSBRenc/src/mh_det.h" //
 #include "../../libSBRenc/src/env_est.h" //
-#include "../../libSBRenc/src/sbr.h" /
+#include "../../libSBRenc/src/sbr.h"
 
 //#define RB_PRINT_TRACE
 

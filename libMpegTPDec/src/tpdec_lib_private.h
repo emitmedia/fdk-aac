@@ -43,4 +43,4 @@ struct TRANSPORTDEC
     UINT  flags;                     /* Flags. */
 };
 
-#endif __TPDEC_LIB_PRIVATE_H__
+#endif /* __TPDEC_LIB_PRIVATE_H__ */
