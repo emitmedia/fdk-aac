@@ -16,3 +16,7 @@ aacEncInfo
 aacEncOpen
 aacEncoder_GetParam
 aacEncoder_SetParam
+aacEncoder_ExtSaveState
+aacEncoder_ExtLoadState
+aacDecoder_ExtSaveState
+aacDecoder_ExtLoadState
