@@ -2143,6 +2143,7 @@ bail:
 #include "../../libSBRenc/src/mh_det.h" //
 #include "../../libSBRenc/src/env_est.h" //
 #include "../../libSBRenc/src/sbr.h"
+#include "../../libSBRenc/src/sbr_rom.h"
 
 //#define RB_PRINT_TRACE
 
@@ -3125,8 +3126,12 @@ struct SBR_ENV_DATA_PersistInfo : SparseStructPersistInfo {
         readOrWrite_(ptr, td);
 
         // SBR_ENV_DATA:
+        // All of the following tables are initialized to point to static/const
+        // ROM tables by FDKsbrEnc_InitSbrHuffmanTables()
+
+        // The following 12 tables may be be initialized to two different sets
+        // of lookup tables depending on the value of amp_res
         /*
-        // REVIEW: I believe these are all static lookup tables
         const INT *hufftableTimeC;
         const INT *hufftableFreqC;
         const UCHAR *hufftableTimeL;
@@ -3136,12 +3141,91 @@ struct SBR_ENV_DATA_PersistInfo : SparseStructPersistInfo {
         const INT *hufftableBalanceTimeC;
         const INT *hufftableLevelFreqC;
         const INT *hufftableBalanceFreqC;
+
         const UCHAR *hufftableLevelTimeL;
         const UCHAR *hufftableBalanceTimeL;
         const UCHAR *hufftableLevelFreqL;
         const UCHAR *hufftableBalanceFreqL;
+        */
 
+         // the following initilization is copied from FDKsbrEnc_InitSbrHuffmanTables()
+        HANDLE_SBR_ENV_DATA sbrEnvData = ptr;
+        switch (sbrEnvData->init_sbr_amp_res) {
 
+        case  SBR_AMP_RES_3_0:
+            /*envelope data*/
+
+            /*Level/Pan - coding */
+            sbrEnvData->hufftableLevelTimeC = v_Huff_envelopeLevelC11T;
+            sbrEnvData->hufftableLevelTimeL = v_Huff_envelopeLevelL11T;
+            sbrEnvData->hufftableBalanceTimeC = bookSbrEnvBalanceC11T;
+            sbrEnvData->hufftableBalanceTimeL = bookSbrEnvBalanceL11T;
+
+            sbrEnvData->hufftableLevelFreqC = v_Huff_envelopeLevelC11F;
+            sbrEnvData->hufftableLevelFreqL = v_Huff_envelopeLevelL11F;
+            sbrEnvData->hufftableBalanceFreqC = bookSbrEnvBalanceC11F;
+            sbrEnvData->hufftableBalanceFreqL = bookSbrEnvBalanceL11F;
+
+            /*Right/Left - coding */
+            sbrEnvData->hufftableTimeC = v_Huff_envelopeLevelC11T;
+            sbrEnvData->hufftableTimeL = v_Huff_envelopeLevelL11T;
+            sbrEnvData->hufftableFreqC = v_Huff_envelopeLevelC11F;
+            sbrEnvData->hufftableFreqL = v_Huff_envelopeLevelL11F;
+
+            // these fields should have been persisted correctly:
+            /*
+            sbrEnvData->codeBookScfLavBalance = CODE_BOOK_SCF_LAV_BALANCE11;
+            sbrEnvData->codeBookScfLav = CODE_BOOK_SCF_LAV11;
+
+            sbrEnvData->si_sbr_start_env_bits = SI_SBR_START_ENV_BITS_AMP_RES_3_0;
+            sbrEnvData->si_sbr_start_env_bits_balance = SI_SBR_START_ENV_BITS_BALANCE_AMP_RES_3_0;
+            */
+            assert(sbrEnvData->codeBookScfLavBalance == CODE_BOOK_SCF_LAV_BALANCE11);
+            assert(sbrEnvData->codeBookScfLav == CODE_BOOK_SCF_LAV11);
+            assert(sbrEnvData->si_sbr_start_env_bits == SI_SBR_START_ENV_BITS_AMP_RES_3_0);
+            assert(sbrEnvData->si_sbr_start_env_bits_balance == SI_SBR_START_ENV_BITS_BALANCE_AMP_RES_3_0);
+            break;
+
+        case SBR_AMP_RES_1_5:
+            /*envelope data*/
+
+            /*Level/Pan - coding */
+            sbrEnvData->hufftableLevelTimeC = v_Huff_envelopeLevelC10T;
+            sbrEnvData->hufftableLevelTimeL = v_Huff_envelopeLevelL10T;
+            sbrEnvData->hufftableBalanceTimeC = bookSbrEnvBalanceC10T;
+            sbrEnvData->hufftableBalanceTimeL = bookSbrEnvBalanceL10T;
+
+            sbrEnvData->hufftableLevelFreqC = v_Huff_envelopeLevelC10F;
+            sbrEnvData->hufftableLevelFreqL = v_Huff_envelopeLevelL10F;
+            sbrEnvData->hufftableBalanceFreqC = bookSbrEnvBalanceC10F;
+            sbrEnvData->hufftableBalanceFreqL = bookSbrEnvBalanceL10F;
+
+            /*Right/Left - coding */
+            sbrEnvData->hufftableTimeC = v_Huff_envelopeLevelC10T;
+            sbrEnvData->hufftableTimeL = v_Huff_envelopeLevelL10T;
+            sbrEnvData->hufftableFreqC = v_Huff_envelopeLevelC10F;
+            sbrEnvData->hufftableFreqL = v_Huff_envelopeLevelL10F;
+
+            /*
+            sbrEnvData->codeBookScfLavBalance = CODE_BOOK_SCF_LAV_BALANCE10;
+            sbrEnvData->codeBookScfLav = CODE_BOOK_SCF_LAV10;
+
+            sbrEnvData->si_sbr_start_env_bits = SI_SBR_START_ENV_BITS_AMP_RES_1_5;
+            sbrEnvData->si_sbr_start_env_bits_balance = SI_SBR_START_ENV_BITS_BALANCE_AMP_RES_1_5;
+            */
+            assert(sbrEnvData->codeBookScfLavBalance == CODE_BOOK_SCF_LAV_BALANCE10);
+            assert(sbrEnvData->codeBookScfLav == CODE_BOOK_SCF_LAV10);
+            assert(sbrEnvData->si_sbr_start_env_bits == SI_SBR_START_ENV_BITS_AMP_RES_1_5);
+            assert(sbrEnvData->si_sbr_start_env_bits_balance == SI_SBR_START_ENV_BITS_BALANCE_AMP_RES_1_5);
+            break;
+
+        default:
+            assert (0); /* undefined amp_res mode */
+        }
+
+        // The following 12 tables are always initialized to point to the
+        // same static/const ROM tables.
+        /*
         const UCHAR *hufftableNoiseTimeL;
         const INT *hufftableNoiseTimeC;
         const UCHAR *hufftableNoiseFreqL;
